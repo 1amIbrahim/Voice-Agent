@@ -1,0 +1,35 @@
+# Python environments and caches
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local recordings, generated audio, and logs
+recordings/
+*.wav
+*.mp3
+*.ogg
+*.log
+
+# Local model and tool caches
+.cache/
+.huggingface/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.vscode/*.log
+.idea/
+.DS_Store
+Thumbs.db

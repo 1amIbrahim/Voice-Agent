@@ -1,0 +1,17 @@
+[voice-gateway] recording for 5.0 seconds
+[voice-gateway] VAD: disabled
+[voice-gateway] ASR model: base.en
+[voice-gateway] output: recordings\utterance.wav
+[voice-gateway] VAD: disabled; processing the full recording
+[voice-gateway] starting microphone recording
+[voice-gateway] checking intent for: 'You'
+[voice-gateway] recording and pipeline processing complete
+[voice-gateway] utterance signal: peak=7, rms=0.5, normalized_rms=0.00002
+[voice-gateway] push-to-talk processing complete
+[voice-gateway] speech segment: 0.00s - 5.00s
+[voice-gateway] audio saved: recordings\utterance.wav
+[voice-gateway] transcript: 'You'
+[voice-gateway] string sent to agent: 'You'
+[voice-gateway] language: en
+[voice-gateway] confidence: -0.770
+[voice-gateway] responses: none

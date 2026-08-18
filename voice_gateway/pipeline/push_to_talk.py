@@ -1,0 +1,74 @@
+"""Push-to-talk orchestration for the local voice gateway."""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from voice_gateway.asr import ASREngine, Transcript
+from voice_gateway.audio import AudioRecorder, SpeechSegment, VoiceActivityDetector
+from voice_gateway.pipeline.loop import PipelineResult, VoicePipeline
+
+
+@dataclass
+class PushToTalkResult:
+    transcript: Transcript
+    audio_path: Path
+    pipeline: PipelineResult
+    segment: SpeechSegment
+
+
+class PushToTalkSession:
+    def __init__(
+        self,
+        recorder: AudioRecorder,
+        vad: Optional[VoiceActivityDetector],
+        asr: ASREngine,
+        voice_pipeline: VoicePipeline,
+    ) -> None:
+        self.recorder = recorder
+        self.vad = vad
+        self.asr = asr
+        self.voice_pipeline = voice_pipeline
+
+    async def process_audio(
+        self,
+        audio: bytes,
+        output_path: Path,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> PushToTalkResult:
+        if self.vad is None:
+            segment = SpeechSegment(
+                start_frame=0,
+                end_frame=len(audio) // (
+                    self.recorder.config.channels * self.recorder.config.sample_width
+                ),
+                sample_rate=self.recorder.config.sample_rate,
+            )
+        else:
+            segments = self.vad.detect(audio, self.recorder.config.sample_rate)
+            if not segments:
+                raise ValueError("no speech detected")
+            segment = segments[0]
+        frame_width = self.recorder.config.channels * self.recorder.config.sample_width
+        start_byte = segment.start_frame * frame_width
+        end_byte = segment.end_frame * frame_width
+        utterance = audio[start_byte:end_byte]
+        audio_path = self.recorder.save_wav(output_path, utterance)
+        transcript = self.asr.transcribe(audio_path, self.recorder.config.sample_rate)
+        pipeline = await self.voice_pipeline.process_transcript(transcript.text, context)
+        return PushToTalkResult(
+            transcript=transcript,
+            audio_path=audio_path,
+            pipeline=pipeline,
+            segment=segment,
+        )
+
+    async def record_and_process(
+        self,
+        duration_seconds: float,
+        output_path: Path,
+        context: Optional[Dict[str, Any]] = None,
+        device: Optional[Any] = None,
+    ) -> PushToTalkResult:
+        audio = self.recorder.record(duration_seconds, device=device)
+        return await self.process_audio(audio, output_path, context)

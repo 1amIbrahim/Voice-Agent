@@ -1,0 +1,25 @@
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Voice Gateway - Record",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "voice_gateway.main",
+      "args": [
+        "--record",
+        "--duration",
+        "5",
+        "--vad-threshold",
+        "0.001"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
+}
