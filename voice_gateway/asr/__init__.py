@@ -1,3 +1,3 @@
-from .engine import ASREngine, FasterWhisperASR, Transcript
+from .engine import ASREngine, OpenAIWhisperASR, Transcript
 
-__all__ = ["ASREngine", "FasterWhisperASR", "Transcript"]
+__all__ = ["ASREngine", "OpenAIWhisperASR", "Transcript"]

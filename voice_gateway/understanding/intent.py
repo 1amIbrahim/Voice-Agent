@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -49,6 +50,10 @@ class RuleBasedUnderstanding:
         control_text = re.sub(r"[,!?]", "", normalized)
         agent_match = self._agent_pattern.search(text)
         target_agent = agent_match.group(1).lower() if agent_match else None
+        if target_agent is None and context:
+            active_agent = context.get("active_agent")
+            if isinstance(active_agent, str) and active_agent:
+                target_agent = active_agent
         entities = {"agent": target_agent} if target_agent else {}
 
         if self._is_cancellation(control_text):
@@ -127,6 +132,26 @@ class RuleBasedUnderstanding:
 class OllamaUnderstanding:
     """Optional Ollama adapter for a local structured-output model."""
 
+    SYSTEM_PROMPT = (
+        "You are the voice-to-agent interpreter for an agentic system. "
+        "Your job is to understand what the user is trying to accomplish from "
+        "their spoken transcript and express that intent clearly for the target "
+        "agent. Treat the transcript as conversational speech: resolve harmless "
+        "disfluencies, repetition, and informal phrasing, but do not change the "
+        "user's meaning. Infer the intended action when it is reasonably implied "
+        "by the words and context, and write a concise agent-facing instruction "
+        "that preserves the user's goal. Do not execute commands, call tools, "
+        "or invent missing information. Preserve negation, constraints, scope, "
+        "entities, priorities, and requested outcomes. Do not broaden the task "
+        "or add actions the user did not authorize. Distinguish commands, "
+        "questions, conversation, confirmations, rejections, cancellations, and "
+        "requests for clarification. Use requires_clarification=true when the "
+        "missing detail could cause the agent to take the wrong action; include "
+        "a concise clarification_question. Use the context only to resolve "
+        "references such as 'it', 'that', or 'there', not to invent facts. "
+        "Return only valid JSON matching the requested schema."
+    )
+
     def __init__(self, model: str = "qwen2.5:3b", client: Any = None) -> None:
         if not model:
             raise ValueError("model must not be empty")
@@ -152,14 +177,37 @@ class OllamaUnderstanding:
         prompt = self._prompt(transcript, context)
         response = client.chat(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
             format=IntentResult.model_json_schema(),
         )
         content = response["message"]["content"]
+        self._log_raw_response(content)
         try:
-            return IntentResult.model_validate_json(content)
+            return IntentResult.model_validate_json(self._extract_json(content))
         except (ValidationError, ValueError, TypeError) as exc:
-            raise RuntimeError("understanding model returned invalid intent JSON") from exc
+            raise RuntimeError(
+                f"understanding model returned invalid intent JSON: {content!r}"
+            ) from exc
+
+    @staticmethod
+    def _log_raw_response(content: Any) -> None:
+        message = f"[voice-gateway] understanding raw response: {content!r}"
+        for stream in (sys.stderr, sys.stdout):
+            try:
+                print(message, file=stream, flush=True)
+                return
+            except (OSError, ValueError):
+                continue
+
+    @staticmethod
+    def _extract_json(content: str) -> str:
+        text = content.strip()
+        if text.startswith("```") and text.endswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, count=1).removesuffix("```").strip()
+        return text
 
     @staticmethod
     def _prompt(transcript: str, context: Optional[Dict[str, Any]]) -> str:

@@ -1,5 +1,6 @@
 """Push-to-talk orchestration for the local voice gateway."""
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -71,4 +72,22 @@ class PushToTalkSession:
         device: Optional[Any] = None,
     ) -> PushToTalkResult:
         audio = self.recorder.record(duration_seconds, device=device)
+        return await self.process_audio(audio, output_path, context)
+
+    async def record_until_silence_and_process(
+        self,
+        max_duration_seconds: float,
+        output_path: Path,
+        silence_duration_seconds: float = 3.0,
+        speech_threshold: float = 0.003,
+        context: Optional[Dict[str, Any]] = None,
+        device: Optional[Any] = None,
+    ) -> PushToTalkResult:
+        audio = await asyncio.to_thread(
+            self.recorder.record_until_silence,
+            max_duration_seconds=max_duration_seconds,
+            silence_duration_seconds=silence_duration_seconds,
+            speech_threshold=speech_threshold,
+            device=device,
+        )
         return await self.process_audio(audio, output_path, context)

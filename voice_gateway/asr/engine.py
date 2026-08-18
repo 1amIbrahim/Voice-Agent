@@ -1,5 +1,7 @@
 """Provider-neutral automatic speech recognition interfaces."""
 
+import contextlib
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Protocol, Union
@@ -19,21 +21,19 @@ class ASREngine(Protocol):
         ...
 
 
-class FasterWhisperASR:
-    """Lazy-loaded faster-whisper adapter for local transcription."""
+class OpenAIWhisperASR:
+    """Lazy-loaded adapter for the OpenAI Whisper Python package."""
 
     def __init__(
         self,
-        model_size: str = "base.en",
+        model_size: str = "small.en",
         device: str = "auto",
-        compute_type: str = "auto",
         language: Optional[str] = "en",
     ) -> None:
         if not model_size:
             raise ValueError("model_size must not be empty")
         self.model_size = model_size
         self.device = device
-        self.compute_type = compute_type
         self.language = language
         self._model: Any = None
 
@@ -41,49 +41,58 @@ class FasterWhisperASR:
         if self._model is not None:
             return self._model
         try:
-            from faster_whisper import WhisperModel
+            import whisper
         except ImportError as exc:
             raise RuntimeError(
-                "Faster-whisper ASR requires the optional 'faster-whisper' package"
+                "OpenAI Whisper ASR requires the optional 'openai-whisper' package"
             ) from exc
 
-        device = self.device
-        compute_type = self.compute_type
-        if device == "auto":
-            device = "cuda"
-            compute_type = "float16"
-        self._model = WhisperModel(
-            self.model_size,
-            device=device,
-            compute_type=compute_type,
-        )
+        device = None if self.device == "auto" else self.device
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self._model = whisper.load_model(self.model_size, device=device)
         return self._model
+
+    @property
+    def runtime_device(self) -> str:
+        if self._model is None:
+            raise RuntimeError("ASR model must be loaded before checking its runtime device")
+        return str(next(self._model.parameters()).device)
+
+    def warm_up(self) -> None:
+        self._load_model()
+
+    def cuda_available(self) -> bool:
+        try:
+            import torch
+        except ImportError:
+            return False
+        return bool(torch.cuda.is_available())
 
     def transcribe(self, audio: Union[bytes, Path], sample_rate: int = 16000) -> Transcript:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         if isinstance(audio, bytes):
             raise RuntimeError(
-                "FasterWhisperASR currently accepts a WAV path; save raw audio first"
+                "OpenAIWhisperASR currently accepts a WAV path; save raw audio first"
             )
         path = Path(audio)
         if not path.exists():
             raise FileNotFoundError(path)
 
         model = self._load_model()
-        segments, info = model.transcribe(
+        result = model.transcribe(
             str(path),
             language=self.language,
-            vad_filter=False,
+            fp16=self.runtime_device.startswith("cuda"),
         )
-        segment_list: List[Any] = list(segments)
-        text = " ".join(segment.text.strip() for segment in segment_list).strip()
-        start_time = segment_list[0].start if segment_list else None
-        end_time = segment_list[-1].end if segment_list else None
-        confidence = self._confidence(segment_list)
+        segments = result.get("segments", [])
+        text = result.get("text", "").strip()
+        start_time = segments[0].get("start") if segments else None
+        end_time = segments[-1].get("end") if segments else None
+        confidence = self._confidence(segments)
         return Transcript(
             text=text,
-            language=getattr(info, "language", self.language),
+            language=result.get("language", self.language),
             confidence=confidence,
             start_time=start_time,
             end_time=end_time,
@@ -92,10 +101,13 @@ class FasterWhisperASR:
     @staticmethod
     def _confidence(segments: List[Any]) -> Optional[float]:
         probabilities = [
-            getattr(segment, "avg_logprob", None)
+            segment.get("avg_logprob")
             for segment in segments
-            if getattr(segment, "avg_logprob", None) is not None
+            if segment.get("avg_logprob") is not None
         ]
         if not probabilities:
             return None
         return sum(probabilities) / len(probabilities)
+
+
+__all__ = ["ASREngine", "OpenAIWhisperASR", "Transcript"]

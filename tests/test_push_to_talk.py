@@ -30,10 +30,113 @@ class FakeRecorder(AudioRecorder):
         super().__init__()
         self.audio = audio
         self.recorded_device = "not-called"
+        self.stream_kwargs = None
 
     def record(self, duration_seconds, device=None):
         self.recorded_device = device
         return self.audio
+
+    def record_until_silence(
+        self,
+        max_duration_seconds,
+        silence_duration_seconds=2.0,
+        speech_threshold=0.003,
+        chunk_duration_ms=100,
+        device=None,
+        on_chunk=None,
+    ):
+        self.stream_kwargs = {
+            "max_duration_seconds": max_duration_seconds,
+            "silence_duration_seconds": silence_duration_seconds,
+            "speech_threshold": speech_threshold,
+            "device": device,
+        }
+        chunks = [self.audio[: len(self.audio) // 2], self.audio[len(self.audio) // 2 :]]
+        for chunk in chunks:
+            if on_chunk is not None:
+                on_chunk(chunk)
+        return self.audio
+
+
+class RecordingUnderstanding:
+    def __init__(self):
+        self.seen = []
+
+    def interpret(self, transcript, context=None):
+        self.seen.append(transcript)
+        from voice_gateway.understanding import RuleBasedUnderstanding
+
+        return RuleBasedUnderstanding().interpret("Tell Claude to check the research folder", context)
+
+
+@pytest.mark.asyncio
+async def test_streaming_transcribes_and_interprets_only_after_capture_ends(tmp_path):
+    recorder = FakeRecorder(tone(0.4))
+    asr = FakeASR()
+    understanding = RecordingUnderstanding()
+    session = PushToTalkSession(
+        recorder=recorder,
+        vad=None,
+        asr=asr,
+        voice_pipeline=VoicePipeline(understanding=understanding),
+    )
+
+    result = await session.record_until_silence_and_process(
+        max_duration_seconds=5.0,
+        output_path=tmp_path / "stream.wav",
+        silence_duration_seconds=3.0,
+        device="stream-device",
+    )
+
+    assert understanding.seen == ["Tell Claude to check the research folder"]
+    assert recorder.stream_kwargs["device"] == "stream-device"
+    assert result.pipeline.responses == ["Task completed."]
+
+
+@pytest.mark.asyncio
+async def test_streaming_does_not_call_asr_from_capture_callback(tmp_path):
+    class CallbackTrackingRecorder(FakeRecorder):
+        def record_until_silence(self, *args, on_chunk=None, **kwargs):
+            assert on_chunk is None
+            return super().record_until_silence(*args, on_chunk=on_chunk, **kwargs)
+
+    session = PushToTalkSession(
+        recorder=CallbackTrackingRecorder(tone(0.1)),
+        vad=None,
+        asr=FakeASR(),
+        voice_pipeline=VoicePipeline(),
+    )
+
+    await session.record_until_silence_and_process(
+        max_duration_seconds=1.0,
+        output_path=tmp_path / "stream.wav",
+    )
+
+
+@pytest.mark.asyncio
+async def test_streaming_forwards_endpoint_parameters(tmp_path):
+    recorder = FakeRecorder(tone(0.1))
+    session = PushToTalkSession(
+        recorder=recorder,
+        vad=None,
+        asr=FakeASR(),
+        voice_pipeline=VoicePipeline(),
+    )
+
+    await session.record_until_silence_and_process(
+        max_duration_seconds=4.0,
+        output_path=tmp_path / "stream.wav",
+        silence_duration_seconds=1.5,
+        speech_threshold=0.01,
+        device=7,
+    )
+
+    assert recorder.stream_kwargs == {
+        "max_duration_seconds": 4.0,
+        "silence_duration_seconds": 1.5,
+        "speech_threshold": 0.01,
+        "device": 7,
+    }
 
 
 @pytest.mark.asyncio

@@ -63,9 +63,13 @@ def test_intent_result_serializes_to_schema():
     assert "requires_clarification" in result.model_json_schema()["properties"]
 
 
-def test_ollama_adapter_uses_validated_response():
+def test_ollama_adapter_uses_system_prompt_and_transcript():
     class FakeClient:
         def chat(self, **kwargs):
+            assert kwargs["messages"][0]["role"] == "system"
+            assert "voice-to-agent interpreter" in kwargs["messages"][0]["content"]
+            assert kwargs["messages"][1]["role"] == "user"
+            assert "Tell Claude to check it" in kwargs["messages"][1]["content"]
             return {
                 "message": {
                     "content": '{"intent":"COMMAND","target_agent":"claude","instruction":"check it","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
@@ -76,3 +80,52 @@ def test_ollama_adapter_uses_validated_response():
 
     assert result.intent is IntentType.COMMAND
     assert result.confidence == pytest.approx(0.91)
+
+
+def test_ollama_adapter_logs_raw_response(capsys):
+    class FakeClient:
+        def chat(self, **kwargs):
+            return {
+                "message": {
+                    "content": '{"intent":"COMMAND","target_agent":"claude","instruction":"check research","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
+                }
+            }
+
+    OllamaUnderstanding(client=FakeClient()).interpret("Tell Claude to check research")
+
+    assert "understanding raw response" in capsys.readouterr().err
+
+
+def test_ollama_adapter_accepts_fenced_json():
+    class FakeClient:
+        def chat(self, **kwargs):
+            return {
+                "message": {
+                    "content": '```json\n{"intent":"COMMAND","target_agent":"claude","instruction":"check research","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}\n```'
+                }
+            }
+
+    result = OllamaUnderstanding(client=FakeClient()).interpret("Tell Claude to check research")
+
+    assert result.instruction == "check research"
+
+
+def test_ollama_system_prompt_requires_structured_non_executing_interpretation():
+    prompt = OllamaUnderstanding.SYSTEM_PROMPT
+
+    assert "voice-to-agent interpreter" in prompt
+    assert "agent-facing instruction" in prompt
+    assert "Preserve negation" in prompt
+    assert "requires_clarification=true" in prompt
+    assert "valid JSON" in prompt
+
+
+def test_ollama_prompt_includes_context():
+    prompt = OllamaUnderstanding._prompt(
+        "Tell it to fix that.",
+        {"active_agent": "claude", "active_task": "parser.py"},
+    )
+
+    assert "Tell it to fix that." in prompt
+    assert "active_agent" in prompt
+    assert "parser.py" in prompt
