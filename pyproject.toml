@@ -11,10 +11,10 @@ requires-python = ">=3.9"
 [project.optional-dependencies]
 audio = ["sounddevice>=0.4", "numpy>=1.24"]
 asr = ["openai-whisper>=20240930"]
-vad = ["silero-vad>=5.1", "torch>=2.0"]
+vad = ["silero-vad>=5.1", "torch>=2.0", "torchaudio>=2.0"]
 understanding = ["ollama>=0.4", "pydantic>=2.0"]
 protocol = ["pydantic>=2.0"]
-tts = []
+tts = ["piper-tts>=1.7"]
 test = ["pytest>=8", "pydantic>=2.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]

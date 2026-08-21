@@ -96,13 +96,13 @@ class RuleBasedUnderstanding:
         verbs = (
             "tell ", "ask ", "run ", "open ", "check ", "find ", "create ",
             "delete ", "merge ", "fix ", "review ", "summarize ", "send ",
-            "deploy ", "start ", "stop ", "show ", "look ",
+            "deploy ", "start ", "stop ", "show ", "look ", "explore ",
         )
         return text.startswith(verbs)
 
     @staticmethod
     def _contains_command_verb(text: str) -> bool:
-        return bool(re.search(r"\b(delete|merge|fix|review|summarize|check|find|open|run|create|send|deploy)\b", text))
+        return bool(re.search(r"\b(delete|merge|fix|review|summarize|check|find|open|run|create|send|deploy|explore)\b", text))
 
     @staticmethod
     def _extract_constraints(text: str) -> List[str]:

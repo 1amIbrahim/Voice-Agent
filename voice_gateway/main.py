@@ -79,8 +79,10 @@ def format_optional(value: Optional[float]) -> str:
 
 
 from voice_gateway.asr import OpenAIWhisperASR
-from voice_gateway.audio import AudioRecorder
+from voice_gateway.audio import AudioRecorder, EnergySpeechDetector, SileroSpeechDetector
 from voice_gateway.pipeline import PushToTalkSession, VoicePipeline
+from voice_gateway.routing import ClaudeCodeAgentPlatform, FakeAgentPlatform
+from voice_gateway.tts import PiperTTS, SpokenDetail, speak_responses
 from voice_gateway.understanding import OllamaUnderstanding, RuleBasedUnderstanding
 
 
@@ -92,8 +94,44 @@ def build_understanding(args: argparse.Namespace) -> Any:
 
 
 
+def build_live_vad(args: argparse.Namespace) -> Any:
+    if args.vad == "silero":
+        return SileroSpeechDetector(threshold=args.silero_threshold)
+    return EnergySpeechDetector(threshold=args.vad_threshold)
+
+
 def pipeline_for(args: argparse.Namespace) -> VoicePipeline:
-    return VoicePipeline(understanding=build_understanding(args))
+    if args.agent_platform == "claude-code":
+        if args.agent_workdir is None:
+            raise ValueError("--agent-workdir is required when using --agent-platform claude-code")
+        agent_platform = ClaudeCodeAgentPlatform(
+            workspace=args.agent_workdir,
+            model=args.agent_model,
+            timeout_seconds=args.agent_timeout,
+        )
+    else:
+        agent_platform = FakeAgentPlatform()
+    return VoicePipeline(
+        understanding=build_understanding(args),
+        agent_platform=agent_platform,
+    )
+
+
+def speak_pipeline_responses(responses: List[str], args: argparse.Namespace) -> Optional[Path]:
+    if args.tts != "piper":
+        return None
+    if not args.tts_model.is_file():
+        raise ValueError(f"Piper voice model was not found: {args.tts_model}")
+    log("synthesizing spoken response with Piper")
+    output_path = speak_responses(
+        responses,
+        PiperTTS(executable=args.tts_executable, model=args.tts_model),
+        args.tts_output,
+        detail=SpokenDetail(args.spoken_detail),
+    )
+    if output_path is not None:
+        log(f"spoken response played: {output_path}")
+    return output_path
 
 
 
@@ -120,12 +158,69 @@ def build_parser() -> argparse.ArgumentParser:
         default="qwen2.5:3b",
         help="local Ollama model used when --understanding ollama is selected",
     )
+    parser.add_argument(
+        "--agent-platform",
+        choices=("fake", "claude-code"),
+        default="fake",
+        help="agent backend; Claude Code runs with plan-mode permission",
+    )
+    parser.add_argument(
+        "--agent-workdir",
+        type=Path,
+        help="explicit workspace for the Claude Code backend",
+    )
+    parser.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=120.0,
+        help="seconds to wait for Claude Code",
+    )
+    parser.add_argument(
+        "--agent-model",
+        default="sonnet",
+        help="Claude Code model alias",
+    )
+    parser.add_argument(
+        "--tts",
+        choices=("none", "piper"),
+        default="none",
+        help="spoken response backend",
+    )
+    parser.add_argument(
+        "--tts-model",
+        type=Path,
+        default=Path("models/piper/jarvis-medium.onnx"),
+        help="Piper voice model path",
+    )
+    parser.add_argument(
+        "--tts-executable",
+        default="piper",
+        help="Piper executable path or command",
+    )
+    parser.add_argument(
+        "--tts-output",
+        type=Path,
+        default=Path("recordings/response.wav"),
+        help="WAV file written before response playback",
+    )
+    parser.add_argument(
+        "--spoken-detail",
+        choices=tuple(detail.value for detail in SpokenDetail),
+        default=SpokenDetail.BRIEF.value,
+        help="amount of each response spoken by TTS",
+    )
     parser.add_argument("--vad", choices=("energy", "silero"), default="energy")
     parser.add_argument(
         "--vad-threshold",
         type=float,
         default=0.005,
         help="Energy VAD RMS threshold; lower values detect quieter speech",
+    )
+    parser.add_argument(
+        "--silero-threshold",
+        type=float,
+        default=0.5,
+        help="Silero VAD speech probability threshold",
     )
     return parser
 
@@ -135,6 +230,7 @@ async def run_text(text: str, args: argparse.Namespace) -> int:
     log(f"transcript: {text!r}")
     result = await pipeline_for(args).process_transcript(text)
     log(f"string sent to agent: {result.command.content.get('instruction', '')!r}")
+    speak_pipeline_responses(result.responses, args)
     log("intent and agent pipeline complete")
     print(json.dumps({"command": result.command.model_dump(mode="json"), "responses": result.responses}))
     return 0
@@ -199,6 +295,7 @@ async def run_record(args: argparse.Namespace) -> int:
     log(f"language: {result.transcript.language or 'unknown'}")
     log(f"confidence: {format_optional(result.transcript.confidence)}")
     log(f"responses: {result.pipeline.responses or 'none'}")
+    speak_pipeline_responses(result.pipeline.responses, args)
 
     print(
         json.dumps(
@@ -219,6 +316,14 @@ async def run_stream(args: argparse.Namespace) -> int:
     log(f"output: {args.output}")
 
     recorder = AudioRecorder()
+    live_vad = build_live_vad(args)
+    if args.vad == "silero":
+        log(f"VAD: silero (threshold {args.silero_threshold:.2f})")
+        log("loading Silero VAD")
+        live_vad.warm_up()
+        log("Silero VAD loaded")
+    else:
+        log(f"VAD: energy (threshold {args.vad_threshold:.4f})")
     asr = OpenAIWhisperASR(model_size=args.model_size)
     log("loading ASR model")
     asr.warm_up()
@@ -243,6 +348,7 @@ async def run_stream(args: argparse.Namespace) -> int:
             output_path=args.output,
             silence_duration_seconds=args.silence_duration,
             speech_threshold=args.vad_threshold,
+            speech_detector=live_vad,
             device=device,
         )
     except KeyboardInterrupt:
@@ -259,8 +365,15 @@ async def run_stream(args: argparse.Namespace) -> int:
     log("intent and agent processing complete")
     log(f"audio saved: {result.audio_path}")
     log(f"final transcript: {result.transcript.text!r}")
+    log(f"interpreted intent: {result.pipeline.command.content.get('intent', 'unknown')}")
+    log(f"agent target: {result.pipeline.command.content.get('target', 'none')}")
     log(f"string sent to agent: {result.pipeline.command.content.get('instruction', '')!r}")
+    log(
+        "agent lifecycle events: "
+        f"{[event.event.value for event in result.pipeline.agent_events] or 'none'}"
+    )
     log(f"responses: {result.pipeline.responses or 'none'}")
+    speak_pipeline_responses(result.pipeline.responses, args)
     print(
         json.dumps(
             {

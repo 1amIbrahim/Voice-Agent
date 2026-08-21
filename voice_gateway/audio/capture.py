@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from .vad import LiveSpeechDetector
+
 
 InputDevice = Union[int, str]
 
@@ -109,6 +111,7 @@ class AudioRecorder:
         chunk_duration_ms: int = 100,
         device: Optional[InputDevice] = None,
         on_chunk: Optional[Callable[[bytes], None]] = None,
+        speech_detector: Optional[LiveSpeechDetector] = None,
     ) -> bytes:
         """Capture chunks until speech is followed by configured silence."""
         if max_duration_seconds <= 0:
@@ -130,6 +133,8 @@ class AudioRecorder:
             ) from exc
 
         chunk_frames = max(1, round(self.config.sample_rate * chunk_duration_ms / 1000))
+        if speech_detector is not None:
+            speech_detector.reset()
         chunks: queue.Queue[bytes] = queue.Queue()
 
         def callback(indata: object, frames: int, time_info: object, status: object) -> None:
@@ -157,16 +162,16 @@ class AudioRecorder:
                     captured.extend(chunk)
                     samples = array.array("h")
                     samples.frombytes(chunk)
-                    rms = (
-                        math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
-                        if samples
-                        else 0.0
-                    )
                     chunk_seconds = len(samples) / (
                         self.config.sample_rate * self.config.channels
                     )
+                    is_speech = (
+                        speech_detector.process(chunk, self.config.sample_rate)
+                        if speech_detector is not None
+                        else self._has_energy_speech(samples, speech_threshold)
+                    )
                     should_stop = False
-                    if rms >= speech_threshold:
+                    if is_speech:
                         speech_started = True
                         silent_seconds = 0.0
                     elif speech_started:
@@ -197,3 +202,10 @@ class AudioRecorder:
                 f"Underlying error: {exc}"
             ) from exc
         return bytes(captured)
+
+    @staticmethod
+    def _has_energy_speech(samples: array.array, threshold: float) -> bool:
+        if not samples:
+            return False
+        rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
+        return rms >= threshold

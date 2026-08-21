@@ -12,14 +12,18 @@ from voice_gateway.safety import AuthorizationPolicy
 from voice_gateway.understanding import IntentType, RuleBasedUnderstanding
 
 
-def _log_intent_check(transcript: str) -> None:
-    message = f"[voice-gateway] checking intent for: {transcript!r}"
+def _log(message: str) -> None:
+    formatted = f"[voice-gateway] {message}"
     for stream in (sys.stderr, sys.stdout):
         try:
-            print(message, file=stream, flush=True)
+            print(formatted, file=stream, flush=True)
             return
         except (OSError, ValueError):
             continue
+
+
+def _log_intent_check(transcript: str) -> None:
+    _log(f"checking intent for: {transcript!r}")
 
 
 @dataclass
@@ -57,15 +61,24 @@ class VoicePipeline:
             transcript,
             self._interpretation_context(context),
         )
+        _log(
+            "intent result: "
+            f"intent={intent.intent.value}, target={intent.target_agent or 'none'}, "
+            f"clarification={intent.requires_clarification}, confidence={intent.confidence:.2f}"
+        )
         if intent.intent is IntentType.CONFIRMATION:
+            _log("confirmation received; checking for a pending command")
             return await self._approve_pending_confirmation(detail)
         if intent.intent in (IntentType.REJECTION, IntentType.CANCELLATION):
+            _log(f"{intent.intent.value.lower()} received; clearing any pending command")
             return self._reject_pending_confirmation(intent.intent)
         if intent.requires_clarification:
+            _log("request requires clarification; dispatch skipped")
             return self._clarification_result(
                 intent.clarification_question or "Please clarify."
             )
         if intent.intent is not IntentType.COMMAND:
+            _log(f"intent {intent.intent.value} is not dispatchable; agent not started")
             command = user_command(
                 UserCommand(
                     intent=intent.intent.value,
@@ -85,6 +98,7 @@ class VoicePipeline:
             session_id=self.session_id,
         )
         if self.authorization_policy.requires_confirmation(command):
+            _log("command requires confirmation; agent dispatch deferred")
             command = command.model_copy(
                 update={
                     "content": {
@@ -162,13 +176,23 @@ class VoicePipeline:
         command: Event,
         detail: DetailLevel,
     ) -> PipelineResult:
+        _log(
+            "dispatching command: "
+            f"target={command.content.get('target') or 'default'}, "
+            f"backend={type(self.agent_platform).__name__}"
+        )
         self.session_context.remember_command(command)
         agent_events = [event async for event in self.agent_platform.dispatch(command)]
+        _log(
+            "agent lifecycle events: "
+            f"{', '.join(event.event.value for event in agent_events) or 'none'}"
+        )
         responses = [
             response
             for event in agent_events
             if (response := self.response_formatter.format(event, detail)) is not None
         ]
+        _log(f"formatted agent responses: {len(responses)}")
         return PipelineResult(
             command=command,
             agent_events=agent_events,

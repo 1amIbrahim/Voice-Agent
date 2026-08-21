@@ -44,11 +44,13 @@ class FakeRecorder(AudioRecorder):
         chunk_duration_ms=100,
         device=None,
         on_chunk=None,
+        speech_detector=None,
     ):
         self.stream_kwargs = {
             "max_duration_seconds": max_duration_seconds,
             "silence_duration_seconds": silence_duration_seconds,
             "speech_threshold": speech_threshold,
+            "speech_detector": speech_detector,
             "device": device,
         }
         chunks = [self.audio[: len(self.audio) // 2], self.audio[len(self.audio) // 2 :]]
@@ -114,6 +116,26 @@ async def test_streaming_does_not_call_asr_from_capture_callback(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_streaming_forwards_live_speech_detector(tmp_path):
+    recorder = FakeRecorder(tone(0.1))
+    detector = object()
+    session = PushToTalkSession(
+        recorder=recorder,
+        vad=None,
+        asr=FakeASR(),
+        voice_pipeline=VoicePipeline(),
+    )
+
+    await session.record_until_silence_and_process(
+        max_duration_seconds=4.0,
+        output_path=tmp_path / "stream.wav",
+        speech_detector=detector,
+    )
+
+    assert recorder.stream_kwargs["speech_detector"] is detector
+
+
+@pytest.mark.asyncio
 async def test_streaming_forwards_endpoint_parameters(tmp_path):
     recorder = FakeRecorder(tone(0.1))
     session = PushToTalkSession(
@@ -135,6 +157,7 @@ async def test_streaming_forwards_endpoint_parameters(tmp_path):
         "max_duration_seconds": 4.0,
         "silence_duration_seconds": 1.5,
         "speech_threshold": 0.01,
+        "speech_detector": None,
         "device": 7,
     }
 

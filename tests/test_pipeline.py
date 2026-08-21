@@ -17,6 +17,15 @@ async def test_pipeline_connects_transcript_to_agent_response():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_dispatches_explore_command():
+    result = await VoicePipeline().process_transcript("Explore the directory.")
+
+    assert result.command.event is EventType.USER_COMMAND
+    assert result.agent_events[-1].event is EventType.AGENT_COMPLETED
+    assert result.responses == ["Task completed."]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_clarification_without_dispatching():
     result = await VoicePipeline().process_transcript("Tell it to fix that")
 

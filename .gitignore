@@ -22,6 +22,8 @@ recordings/
 # Local model and tool caches
 .cache/
 .huggingface/
+models/
+tools/
 
 # Local configuration and secrets
 .env

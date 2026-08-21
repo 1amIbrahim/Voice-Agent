@@ -22,6 +22,13 @@ def test_command_extracts_agent_and_instruction(interpreter):
     assert result.instruction == "Tell Claude to check the research folder."
 
 
+def test_explore_is_a_command(interpreter):
+    result = interpreter.interpret("Explore the directory.")
+
+    assert result.intent is IntentType.COMMAND
+    assert result.instruction == "Explore the directory."
+
+
 def test_meaning_preserves_negation_and_constraints(interpreter):
     result = interpreter.interpret("Don't delete anything, just merge the duplicate notes.")
 

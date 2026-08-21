@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from voice_gateway.asr import ASREngine, Transcript
-from voice_gateway.audio import AudioRecorder, SpeechSegment, VoiceActivityDetector
+from voice_gateway.audio import (
+    AudioRecorder,
+    LiveSpeechDetector,
+    SpeechSegment,
+    VoiceActivityDetector,
+)
 from voice_gateway.pipeline.loop import PipelineResult, VoicePipeline
 
 
@@ -80,6 +85,7 @@ class PushToTalkSession:
         output_path: Path,
         silence_duration_seconds: float = 3.0,
         speech_threshold: float = 0.003,
+        speech_detector: Optional[LiveSpeechDetector] = None,
         context: Optional[Dict[str, Any]] = None,
         device: Optional[Any] = None,
     ) -> PushToTalkResult:
@@ -88,6 +94,7 @@ class PushToTalkSession:
             max_duration_seconds=max_duration_seconds,
             silence_duration_seconds=silence_duration_seconds,
             speech_threshold=speech_threshold,
+            speech_detector=speech_detector,
             device=device,
         )
         return await self.process_audio(audio, output_path, context)

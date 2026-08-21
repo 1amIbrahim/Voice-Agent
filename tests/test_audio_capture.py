@@ -106,6 +106,39 @@ def test_record_until_silence_stops_after_silence(monkeypatch):
     assert audio == b"".join(chunks)
 
 
+def test_record_until_silence_uses_live_speech_detector(monkeypatch):
+    chunks = [
+        _pcm16_silence(0.1),
+        _pcm16_tone(0.1),
+        _pcm16_silence(0.1),
+        _pcm16_silence(0.1),
+    ]
+    monkeypatch.setitem(sys.modules, "sounddevice", _fake_sounddevice(chunks))
+
+    class Detector:
+        def __init__(self):
+            self.reset_called = False
+            self.calls = 0
+
+        def reset(self):
+            self.reset_called = True
+
+        def process(self, audio, sample_rate):
+            self.calls += 1
+            return self.calls == 2
+
+    detector = Detector()
+    audio = AudioRecorder().record_until_silence(
+        max_duration_seconds=1.0,
+        silence_duration_seconds=0.2,
+        speech_detector=detector,
+    )
+
+    assert detector.reset_called is True
+    assert detector.calls == 4
+    assert audio == b"".join(chunks)
+
+
 def test_record_until_silence_rejects_non_pcm16():
     recorder = AudioRecorder(AudioConfig(sample_width=1))
     with pytest.raises(ValueError, match="mono PCM16"):

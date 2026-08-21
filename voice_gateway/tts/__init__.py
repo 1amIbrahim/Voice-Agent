@@ -1,3 +1,3 @@
-from .engine import PiperTTS, TTSEngine
+from .engine import PiperTTS, SpokenDetail, TTSEngine, play_wav, speak_responses, spoken_summary
 
-__all__ = ["PiperTTS", "TTSEngine"]
+__all__ = ["PiperTTS", "SpokenDetail", "TTSEngine", "play_wav", "speak_responses", "spoken_summary"]
