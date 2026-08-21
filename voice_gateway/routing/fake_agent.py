@@ -22,7 +22,15 @@ class FakeAgentPlatform:
             "correlation_id": command.id,
             "task_id": task_id,
         }
-        yield Event(event=EventType.AGENT_STARTED, content={"agent": self.agent_name}, **base)
+        yield Event(
+            event=EventType.AGENT_STARTED,
+            content={
+                "agent": self.agent_name,
+                "instruction": command.content.get("instruction"),
+                "acknowledgement": command.content.get("acknowledgement"),
+            },
+            **base,
+        )
         yield Event(
             event=EventType.AGENT_PROGRESS,
             content={"message": "Working on the request"},

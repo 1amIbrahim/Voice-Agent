@@ -1,6 +1,7 @@
 """Convert structured agent events into concise spoken responses."""
 
 from enum import Enum
+import re
 from typing import Optional
 
 from voice_gateway.protocol import Event, EventType
@@ -14,6 +15,17 @@ class DetailLevel(str, Enum):
 
 
 class ResponseFormatter:
+    def acknowledgement(self, event: Event) -> str:
+        acknowledgement = event.content.get("acknowledgement")
+        if isinstance(acknowledgement, str) and acknowledgement.strip():
+            return acknowledgement.strip()
+        instruction = event.content.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return "On it, sir."
+        action = re.sub(r"\b(?:tell|ask)\s+(?:claude|codex|gemini|opencode)\s+to\s+", "", instruction, flags=re.IGNORECASE)
+        action = action.strip().rstrip(".?!")
+        return f"{action[:1].upper() + action[1:]}, sir."
+
     def format(self, event: Event, detail: DetailLevel = DetailLevel.NORMAL) -> Optional[str]:
         if event.event is EventType.AGENT_STARTED:
             return None

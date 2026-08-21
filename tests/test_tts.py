@@ -62,6 +62,21 @@ def test_speak_responses_synthesizes_and_plays_combined_text(tmp_path):
     assert played == [output]
 
 
+def test_speak_responses_appends_follow_up_prompt(tmp_path):
+    engine = FakeTTS()
+    output = tmp_path / "response.wav"
+
+    speak_responses(
+        ["Task completed."],
+        engine,
+        output,
+        follow_up="What would you like to do next?",
+        player=lambda path: None,
+    )
+
+    assert engine.calls == [("Task completed. What would you like to do next?", output)]
+
+
 def test_speak_responses_skips_empty_responses(tmp_path):
     engine = FakeTTS()
 

@@ -93,6 +93,7 @@ async def test_claude_code_runs_in_plan_mode_with_raw_json_payload(tmp_path):
         EventType.AGENT_COMPLETED,
     ]
     assert all(event.correlation_id == user_event.id for event in events)
+    assert events[0].content["instruction"] == "Review the authentication flow"
     assert events[1].content["message"] == "Proposed review steps"
     assert events[1].content["mode"] == "plan"
     assert events[0].task_id == events[1].task_id

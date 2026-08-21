@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from voice_gateway.context import PendingConfirmation, SessionContext
 from voice_gateway.protocol import Event, EventType, UserCommand, user_command
@@ -39,6 +39,7 @@ class VoicePipeline:
         understanding: Optional[Any] = None,
         agent_platform: Optional[Any] = None,
         response_formatter: Optional[ResponseFormatter] = None,
+        conversation_engine: Optional[Any] = None,
         session_id: str = "voice_session_01",
         session_context: Optional[SessionContext] = None,
         authorization_policy: Optional[AuthorizationPolicy] = None,
@@ -46,6 +47,11 @@ class VoicePipeline:
         self.understanding = understanding or RuleBasedUnderstanding()
         self.agent_platform = agent_platform or FakeAgentPlatform()
         self.response_formatter = response_formatter or ResponseFormatter()
+        self.conversation_engine = conversation_engine or (
+            self.understanding
+            if callable(getattr(self.understanding, "respond", None))
+            else None
+        )
         self.session_id = session_id
         self.session_context = session_context or SessionContext()
         self.authorization_policy = authorization_policy or AuthorizationPolicy()
@@ -55,6 +61,7 @@ class VoicePipeline:
         transcript: str,
         context: Optional[Dict[str, Any]] = None,
         detail: DetailLevel = DetailLevel.NORMAL,
+        on_agent_started: Optional[Callable[[Event], None]] = None,
     ) -> PipelineResult:
         _log_intent_check(transcript)
         intent = self.understanding.interpret(
@@ -66,9 +73,12 @@ class VoicePipeline:
             f"intent={intent.intent.value}, target={intent.target_agent or 'none'}, "
             f"clarification={intent.requires_clarification}, confidence={intent.confidence:.2f}"
         )
+        if intent.intent is IntentType.END_CONVERSATION:
+            _log("conversation exit received; dispatch skipped")
+            return self._conversation_exit_result()
         if intent.intent is IntentType.CONFIRMATION:
             _log("confirmation received; checking for a pending command")
-            return await self._approve_pending_confirmation(detail)
+            return await self._approve_pending_confirmation(detail, on_agent_started)
         if intent.intent in (IntentType.REJECTION, IntentType.CANCELLATION):
             _log(f"{intent.intent.value.lower()} received; clearing any pending command")
             return self._reject_pending_confirmation(intent.intent)
@@ -86,7 +96,13 @@ class VoicePipeline:
                 ),
                 session_id=self.session_id,
             )
-            return PipelineResult(command=command)
+            if self.conversation_engine is None:
+                return PipelineResult(command=command)
+            reply = self.conversation_engine.respond(
+                transcript,
+                self._interpretation_context(context),
+            )
+            return PipelineResult(command=command, responses=[reply])
 
         command = user_command(
             UserCommand(
@@ -94,6 +110,7 @@ class VoicePipeline:
                 instruction=intent.instruction or transcript,
                 target=intent.target_agent,
                 constraints=intent.constraints,
+                acknowledgement=intent.acknowledgement,
             ),
             session_id=self.session_id,
         )
@@ -113,7 +130,7 @@ class VoicePipeline:
                 message=message,
             )
             return PipelineResult(command=command, responses=[message])
-        return await self._dispatch(command, detail)
+        return await self._dispatch(command, detail, on_agent_started)
 
     def _interpretation_context(
         self,
@@ -131,9 +148,20 @@ class VoicePipeline:
         )
         return PipelineResult(command=command, responses=[message])
 
+    def _conversation_exit_result(self) -> PipelineResult:
+        command = user_command(
+            UserCommand(
+                intent=IntentType.END_CONVERSATION.value,
+                instruction="end conversation",
+            ),
+            session_id=self.session_id,
+        )
+        return PipelineResult(command=command, responses=["Conversation ended. Goodbye."])
+
     async def _approve_pending_confirmation(
         self,
         detail: DetailLevel,
+        on_agent_started: Optional[Callable[[Event], None]] = None,
     ) -> PipelineResult:
         pending = self.session_context.pending_confirmation
         if pending is None:
@@ -146,7 +174,7 @@ class VoicePipeline:
             content={"decision": "approved"},
         )
         self.session_context.pending_confirmation = None
-        result = await self._dispatch(pending.command, detail)
+        result = await self._dispatch(pending.command, detail, on_agent_started)
         return PipelineResult(
             command=decision,
             agent_events=result.agent_events,
@@ -175,6 +203,7 @@ class VoicePipeline:
         self,
         command: Event,
         detail: DetailLevel,
+        on_agent_started: Optional[Callable[[Event], None]] = None,
     ) -> PipelineResult:
         _log(
             "dispatching command: "
@@ -182,17 +211,26 @@ class VoicePipeline:
             f"backend={type(self.agent_platform).__name__}"
         )
         self.session_context.remember_command(command)
-        agent_events = [event async for event in self.agent_platform.dispatch(command)]
+        agent_events: List[Event] = []
+        responses: List[str] = []
+        async for event in self.agent_platform.dispatch(command):
+            agent_events.append(event)
+            if event.event is EventType.AGENT_STARTED and on_agent_started is not None:
+                on_agent_started(event)
+            response = self.response_formatter.format(event, detail)
+            if response is not None:
+                responses.append(response)
         _log(
             "agent lifecycle events: "
             f"{', '.join(event.event.value for event in agent_events) or 'none'}"
         )
-        responses = [
-            response
-            for event in agent_events
-            if (response := self.response_formatter.format(event, detail)) is not None
-        ]
         _log(f"formatted agent responses: {len(responses)}")
+        remember_exchange = getattr(self.conversation_engine, "remember_exchange", None)
+        if callable(remember_exchange) and responses:
+            remember_exchange(
+                str(command.content.get("instruction", "")),
+                " ".join(responses),
+            )
         return PipelineResult(
             command=command,
             agent_events=agent_events,

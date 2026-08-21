@@ -62,7 +62,12 @@ class ClaudeCodeAgentPlatform:
         }
         yield Event(
             event=EventType.AGENT_STARTED,
-            content={"agent": "claude-code", "mode": "plan"},
+            content={
+                "agent": "claude-code",
+                "mode": "plan",
+                "instruction": command.content.get("instruction"),
+                "acknowledgement": command.content.get("acknowledgement"),
+            },
             **base,
         )
 

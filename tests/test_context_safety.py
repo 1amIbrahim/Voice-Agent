@@ -34,9 +34,11 @@ async def test_confirmation_dispatches_the_correlated_pending_command():
     pipeline = VoicePipeline()
     pending = await pipeline.process_transcript("Tell Claude to delete the research folder")
 
-    approved = await pipeline.process_transcript("Yes")
+    started = []
+    approved = await pipeline.process_transcript("Yes", on_agent_started=started.append)
 
     assert approved.command.event is EventType.USER_CONFIRMATION
+    assert started[0].event is EventType.AGENT_STARTED
     assert approved.command.correlation_id == pending.command.id
     assert approved.agent_events[-1].event is EventType.AGENT_COMPLETED
 

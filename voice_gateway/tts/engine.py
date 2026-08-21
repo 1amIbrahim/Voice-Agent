@@ -89,9 +89,12 @@ def speak_responses(
     output_path: Path,
     detail: SpokenDetail = SpokenDetail.BRIEF,
     player: WavPlayer = play_wav,
+    follow_up: Optional[str] = None,
 ) -> Optional[Path]:
     text = "\n\n".join(response.strip() for response in responses if response.strip())
     spoken_text = spoken_summary(text, detail)
+    if follow_up and spoken_text:
+        spoken_text = f"{spoken_text} {follow_up.strip()}"
     if not spoken_text:
         return None
     audio_path = engine.synthesize(spoken_text, output_path)

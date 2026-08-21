@@ -1,9 +1,10 @@
 import pytest
 
 from voice_gateway.understanding import (
+    GeminiAssistant,
     IntentResult,
     IntentType,
-    OllamaUnderstanding,
+    OllamaAssistant,
     RuleBasedUnderstanding,
 )
 
@@ -27,6 +28,16 @@ def test_explore_is_a_command(interpreter):
 
     assert result.intent is IntentType.COMMAND
     assert result.instruction == "Explore the directory."
+
+
+def test_polite_read_request_is_a_command(interpreter):
+    transcript = "Can you read the readme file only? Just get the readme file for me."
+
+    result = interpreter.interpret(transcript)
+
+    assert result.intent is IntentType.COMMAND
+    assert result.instruction == transcript
+    assert "only_requested_scope" in result.constraints
 
 
 def test_meaning_preserves_negation_and_constraints(interpreter):
@@ -56,6 +67,7 @@ def test_control_intents(interpreter):
     assert interpreter.interpret("Stop").intent is IntentType.CANCELLATION
     assert interpreter.interpret("Yes, please").intent is IntentType.CONFIRMATION
     assert interpreter.interpret("No").intent is IntentType.REJECTION
+    assert interpreter.interpret("End conversation").intent is IntentType.END_CONVERSATION
 
 
 def test_empty_transcript_is_rejected(interpreter):
@@ -67,29 +79,109 @@ def test_intent_result_serializes_to_schema():
     result = IntentResult(intent=IntentType.QUERY, confidence=0.9)
 
     assert result.model_dump()["intent"] == "QUERY"
-    assert "requires_clarification" in result.model_json_schema()["properties"]
+    properties = result.model_json_schema()["properties"]
+    assert "requires_clarification" in properties
+    assert "acknowledgement" in properties
 
 
-def test_ollama_adapter_uses_system_prompt_and_transcript():
+def test_ollama_assistant_uses_non_thinking_only_for_intent():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            if "format" in kwargs:
+                return {
+                    "message": {
+                        "content": '{"intent":"QUERY","target_agent":null,"instruction":"How are you?","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
+                    }
+                }
+            return {"message": {"content": "Fully operational, sir."}}
+
+    client = FakeClient()
+    assistant = OllamaAssistant(client=client)
+
+    assistant.interpret("How are you?")
+    reply = assistant.respond("How are you?")
+
+    assert reply == "Fully operational, sir."
+    assert client.calls[0]["messages"][0]["content"].startswith("/no_think")
+    assert "format" in client.calls[0]
+    assert not client.calls[1]["messages"][0]["content"].startswith("/no_think")
+    assert "format" not in client.calls[1]
+    assert "conversational voice of a local" in client.calls[1]["messages"][0]["content"]
+
+
+def test_ollama_assistant_intent_prompt_includes_transcript_context_and_history():
     class FakeClient:
         def chat(self, **kwargs):
             assert kwargs["messages"][0]["role"] == "system"
-            assert "voice-to-agent interpreter" in kwargs["messages"][0]["content"]
             assert kwargs["messages"][1]["role"] == "user"
-            assert "Tell Claude to check it" in kwargs["messages"][1]["content"]
+            user_prompt = kwargs["messages"][1]["content"]
+            assert "Tell Claude to check it" in user_prompt
+            assert "active_agent" in user_prompt
+            assert "Earlier result" in user_prompt
             return {
                 "message": {
                     "content": '{"intent":"COMMAND","target_agent":"claude","instruction":"check it","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
                 }
             }
 
-    result = OllamaUnderstanding(client=FakeClient()).interpret("Tell Claude to check it")
+    assistant = OllamaAssistant(client=FakeClient())
+    assistant.remember_exchange("Earlier command", "Earlier result")
+    result = assistant.interpret(
+        "Tell Claude to check it",
+        {"active_agent": "claude"},
+    )
 
     assert result.intent is IntentType.COMMAND
     assert result.confidence == pytest.approx(0.91)
 
 
-def test_ollama_adapter_logs_raw_response(capsys):
+def test_ollama_assistant_rejects_false_control_intent_for_command():
+    class FakeClient:
+        def chat(self, **kwargs):
+            return {
+                "message": {
+                    "content": '{"intent":"REJECTION","target_agent":null,"instruction":null,"entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":1.0}'
+                }
+            }
+
+    result = OllamaAssistant(client=FakeClient()).interpret("Explore the directory.")
+
+    assert result.intent is IntentType.COMMAND
+    assert result.instruction == "Explore the directory."
+
+
+def test_ollama_assistant_rejects_non_command_for_explicit_polite_command():
+    class FakeClient:
+        def chat(self, **kwargs):
+            return {
+                "message": {
+                    "content": '{"intent":"CONVERSATION","target_agent":null,"instruction":"I cannot read files.","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.9}'
+                }
+            }
+
+    transcript = "Can you read the readme file only? Just get the readme file for me."
+    result = OllamaAssistant(client=FakeClient()).interpret(transcript)
+
+    assert result.intent is IntentType.COMMAND
+    assert result.instruction == transcript
+    assert "only_requested_scope" in result.constraints
+
+
+def test_ollama_assistant_handles_explicit_control_without_model_call():
+    class FailingClient:
+        def chat(self, **kwargs):
+            raise AssertionError("explicit controls must not call the model")
+
+    result = OllamaAssistant(client=FailingClient()).interpret("No")
+
+    assert result.intent is IntentType.REJECTION
+
+
+def test_ollama_assistant_logs_raw_response(capsys):
     class FakeClient:
         def chat(self, **kwargs):
             return {
@@ -98,12 +190,12 @@ def test_ollama_adapter_logs_raw_response(capsys):
                 }
             }
 
-    OllamaUnderstanding(client=FakeClient()).interpret("Tell Claude to check research")
+    OllamaAssistant(client=FakeClient()).interpret("Tell Claude to check research")
 
     assert "understanding raw response" in capsys.readouterr().err
 
 
-def test_ollama_adapter_accepts_fenced_json():
+def test_ollama_assistant_accepts_fenced_json():
     class FakeClient:
         def chat(self, **kwargs):
             return {
@@ -112,27 +204,163 @@ def test_ollama_adapter_accepts_fenced_json():
                 }
             }
 
-    result = OllamaUnderstanding(client=FakeClient()).interpret("Tell Claude to check research")
+    result = OllamaAssistant(client=FakeClient()).interpret("Tell Claude to check research")
 
     assert result.instruction == "check research"
 
 
-def test_ollama_system_prompt_requires_structured_non_executing_interpretation():
-    prompt = OllamaUnderstanding.SYSTEM_PROMPT
+def test_ollama_assistant_bounds_natural_history_without_intent_json():
+    assistant = OllamaAssistant(client=object(), max_history_messages=4)
 
-    assert "voice-to-agent interpreter" in prompt
+    assistant.remember_exchange("first", "one")
+    assistant.remember_exchange("second", "two")
+    assistant.remember_exchange("third", "three")
+
+    assert assistant.history == [
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "three"},
+    ]
+    assert all('"intent"' not in message["content"] for message in assistant.history)
+
+
+def test_ollama_intent_prompt_requires_structured_non_executing_interpretation():
+    prompt = OllamaAssistant.INTENT_SYSTEM_PROMPT
+
+    assert prompt.startswith("/no_think")
     assert "agent-facing instruction" in prompt
-    assert "Preserve negation" in prompt
+    assert "Preserve the user's requested scope" in prompt
     assert "requires_clarification=true" in prompt
-    assert "valid JSON" in prompt
+    assert "include an acknowledgement" in prompt
+    assert "never claim" in prompt
+    assert "Do not execute commands" in prompt
 
 
-def test_ollama_prompt_includes_context():
-    prompt = OllamaUnderstanding._prompt(
-        "Tell it to fix that.",
-        {"active_agent": "claude", "active_task": "parser.py"},
-    )
+def test_gemini_assistant_uses_interactions_for_intent_and_conversation():
+    class Interaction:
+        def __init__(self, output_text):
+            self.output_text = output_text
 
-    assert "Tell it to fix that." in prompt
-    assert "active_agent" in prompt
-    assert "parser.py" in prompt
+    class Interactions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if "schema" in kwargs["input"]:
+                return Interaction(
+                    '{"intent":"QUERY","target_agent":null,"instruction":"How are you?","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
+                )
+            return Interaction("Fully operational, sir.")
+
+    class FakeClient:
+        def __init__(self):
+            self.interactions = Interactions()
+
+    client = FakeClient()
+    assistant = GeminiAssistant(client=client)
+
+    intent = assistant.interpret("How are you?")
+    reply = assistant.respond("How are you?")
+
+    assert intent.intent is IntentType.QUERY
+    assert reply == "Fully operational, sir."
+    assert client.interactions.calls[0]["model"] == "gemini-3.7-flash"
+    assert "schema" in client.interactions.calls[0]["input"]
+    assert "schema" not in client.interactions.calls[1]["input"]
+
+
+def test_gemini_assistant_handles_explicit_control_without_api_call():
+    class FailingInteractions:
+        def create(self, **kwargs):
+            raise AssertionError("explicit controls must not call Gemini")
+
+    class FakeClient:
+        interactions = FailingInteractions()
+
+    result = GeminiAssistant(client=FakeClient()).interpret("End conversation")
+
+    assert result.intent is IntentType.END_CONVERSATION
+
+
+def test_gemini_assistant_rejects_false_control_for_command():
+    class Interaction:
+        output_text = '{"intent":"REJECTION","target_agent":null,"instruction":null,"entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":1.0}'
+
+    class Interactions:
+        def create(self, **kwargs):
+            return Interaction()
+
+    class FakeClient:
+        interactions = Interactions()
+
+    result = GeminiAssistant(client=FakeClient()).interpret("Explore the directory.")
+
+    assert result.intent is IntentType.COMMAND
+    assert result.instruction == "Explore the directory."
+
+
+def test_gemini_assistant_bounds_shared_history():
+    assistant = GeminiAssistant(client=object(), max_history_messages=2)
+
+    assistant.remember_exchange("first", "one")
+    assistant.remember_exchange("second", "two")
+
+    assert assistant.history == [
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "two"},
+    ]
+
+
+def test_gemini_assistant_rejects_invalid_intent_json():
+    class Interaction:
+        output_text = "not json"
+
+    class Interactions:
+        def create(self, **kwargs):
+            return Interaction()
+
+    class FakeClient:
+        interactions = Interactions()
+
+    with pytest.raises(RuntimeError, match="invalid intent JSON"):
+        GeminiAssistant(client=FakeClient()).interpret("How are you?")
+
+
+def test_gemini_assistant_logs_intent_request_and_response(capsys):
+    class Interaction:
+        output_text = '{"intent":"QUERY","target_agent":null,"instruction":"How are you?","entities":{},"constraints":[],"requires_clarification":false,"clarification_question":null,"confidence":0.91}'
+
+    class Interactions:
+        def create(self, **kwargs):
+            return Interaction()
+
+    class FakeClient:
+        interactions = Interactions()
+
+    GeminiAssistant(client=FakeClient()).interpret("How are you?")
+
+    logs = capsys.readouterr().err
+    assert "Gemini intent starting: sent='How are you?'" in logs
+    assert "Gemini intent received in" in logs
+    assert "received='{\"intent\":\"QUERY\"" in logs
+    assert "instructions" not in logs
+    assert "schema" not in logs
+    assert "recent_conversation" not in logs
+
+
+def test_gemini_assistant_logs_api_exception(capsys):
+    class Interactions:
+        def create(self, **kwargs):
+            raise TimeoutError("request timed out")
+
+    class FakeClient:
+        interactions = Interactions()
+
+    with pytest.raises(TimeoutError, match="request timed out"):
+        GeminiAssistant(client=FakeClient()).interpret("How are you?")
+
+    logs = capsys.readouterr().err
+    assert "Gemini intent failed after" in logs
+    assert "TimeoutError: request timed out" in logs

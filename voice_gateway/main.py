@@ -83,13 +83,15 @@ from voice_gateway.audio import AudioRecorder, EnergySpeechDetector, SileroSpeec
 from voice_gateway.pipeline import PushToTalkSession, VoicePipeline
 from voice_gateway.routing import ClaudeCodeAgentPlatform, FakeAgentPlatform
 from voice_gateway.tts import PiperTTS, SpokenDetail, speak_responses
-from voice_gateway.understanding import OllamaUnderstanding, RuleBasedUnderstanding
+from voice_gateway.understanding import GeminiAssistant, OllamaAssistant, RuleBasedUnderstanding
 
 
 
 def build_understanding(args: argparse.Namespace) -> Any:
-    if args.understanding == "ollama":
-        return OllamaUnderstanding(model=args.understanding_model)
+    if args.understanding == "gemini":
+        return GeminiAssistant(model=args.gemini_model)
+    if args.understanding == "ollama" or args.conversation:
+        return OllamaAssistant(model=args.ollama_model)
     return RuleBasedUnderstanding()
 
 
@@ -111,13 +113,19 @@ def pipeline_for(args: argparse.Namespace) -> VoicePipeline:
         )
     else:
         agent_platform = FakeAgentPlatform()
+    assistant = build_understanding(args)
     return VoicePipeline(
-        understanding=build_understanding(args),
+        understanding=assistant,
         agent_platform=agent_platform,
+        conversation_engine=assistant if args.conversation else None,
     )
 
 
-def speak_pipeline_responses(responses: List[str], args: argparse.Namespace) -> Optional[Path]:
+def speak_pipeline_responses(
+    responses: List[str],
+    args: argparse.Namespace,
+    follow_up: Optional[str] = None,
+) -> Optional[Path]:
     if args.tts != "piper":
         return None
     if not args.tts_model.is_file():
@@ -128,6 +136,7 @@ def speak_pipeline_responses(responses: List[str], args: argparse.Namespace) -> 
         PiperTTS(executable=args.tts_executable, model=args.tts_model),
         args.tts_output,
         detail=SpokenDetail(args.spoken_detail),
+        follow_up=follow_up,
     )
     if output_path is not None:
         log(f"spoken response played: {output_path}")
@@ -141,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--text", help="process a transcript without microphone or model dependencies")
     mode.add_argument("--record", action="store_true", help="record one push-to-talk utterance")
     mode.add_argument("--stream", action="store_true", help="transcribe while listening and stop after silence")
+    mode.add_argument("--conversation", action="store_true", help="continue endpointed voice turns until 'end conversation'")
     parser.add_argument("--list-devices", action="store_true", help="list available microphone devices")
     parser.add_argument("--duration", type=float, default=5.0, help="recording duration in seconds")
     parser.add_argument("--silence-duration", type=float, default=3.0, help="seconds of silence that end streaming capture")
@@ -149,14 +159,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-size", default="small.en")
     parser.add_argument(
         "--understanding",
-        choices=("rule", "ollama"),
+        choices=("rule", "ollama", "gemini"),
         default="rule",
         help="intent understanding provider",
     )
     parser.add_argument(
-        "--understanding-model",
-        default="qwen2.5:3b",
-        help="local Ollama model used when --understanding ollama is selected",
+        "--ollama-model",
+        default="qwen3:4b",
+        help="shared local Ollama model for intent understanding and conversation",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        default="gemini-3.7-flash",
+        help="shared Gemini model for intent understanding and conversation",
     )
     parser.add_argument(
         "--agent-platform",
@@ -340,50 +355,79 @@ async def run_stream(args: argparse.Namespace) -> int:
     if device is not None:
         log(f"microphone device: {device}")
 
-    log("recording started; speak now")
+    while True:
+        log("recording started; speak now")
+        acknowledgement_task: Optional[asyncio.Task] = None
 
-    try:
-        result = await session.record_until_silence_and_process(
-            max_duration_seconds=args.duration,
-            output_path=args.output,
-            silence_duration_seconds=args.silence_duration,
-            speech_threshold=args.vad_threshold,
-            speech_detector=live_vad,
-            device=device,
-        )
-    except KeyboardInterrupt:
-        log("streaming recording interrupted before completion")
-        return 130
-    except RuntimeError as exc:
-        log_error(f"streaming recording failed: {exc}")
-        return 1
-    except ValueError as exc:
-        log_error(str(exc))
-        return 1
+        def speak_acknowledgement(event: Any) -> None:
+            nonlocal acknowledgement_task
+            acknowledgement = session.voice_pipeline.response_formatter.acknowledgement(event)
+            log(f"acknowledgement: {acknowledgement}")
+            acknowledgement_task = asyncio.create_task(
+                asyncio.to_thread(speak_pipeline_responses, [acknowledgement], args)
+            )
 
-    log("silence endpoint detected")
-    log("intent and agent processing complete")
-    log(f"audio saved: {result.audio_path}")
-    log(f"final transcript: {result.transcript.text!r}")
-    log(f"interpreted intent: {result.pipeline.command.content.get('intent', 'unknown')}")
-    log(f"agent target: {result.pipeline.command.content.get('target', 'none')}")
-    log(f"string sent to agent: {result.pipeline.command.content.get('instruction', '')!r}")
-    log(
-        "agent lifecycle events: "
-        f"{[event.event.value for event in result.pipeline.agent_events] or 'none'}"
-    )
-    log(f"responses: {result.pipeline.responses or 'none'}")
-    speak_pipeline_responses(result.pipeline.responses, args)
-    print(
-        json.dumps(
-            {
-                "audio_path": str(result.audio_path),
-                "transcript": result.transcript.__dict__,
-                "responses": result.pipeline.responses,
-            }
+        try:
+            result = await session.record_until_silence_and_process(
+                max_duration_seconds=args.duration,
+                output_path=args.output,
+                silence_duration_seconds=args.silence_duration,
+                speech_threshold=args.vad_threshold,
+                speech_detector=live_vad,
+                device=device,
+                on_agent_started=speak_acknowledgement if args.conversation else None,
+            )
+        except KeyboardInterrupt:
+            log("streaming recording interrupted before completion")
+            return 130
+        except RuntimeError as exc:
+            log_error(f"streaming recording failed: {exc}")
+            return 1
+        except ValueError as exc:
+            log_error(str(exc))
+            return 1
+
+        if acknowledgement_task is not None:
+            await acknowledgement_task
+        log("silence endpoint detected")
+        log("intent and agent processing complete")
+        log(f"audio saved: {result.audio_path}")
+        log(f"final transcript: {result.transcript.text!r}")
+        log(f"interpreted intent: {result.pipeline.command.content.get('intent', 'unknown')}")
+        log(f"agent target: {result.pipeline.command.content.get('target', 'none')}")
+        log(f"string sent to agent: {result.pipeline.command.content.get('instruction', '')!r}")
+        log(
+            "agent lifecycle events: "
+            f"{[event.event.value for event in result.pipeline.agent_events] or 'none'}"
         )
-    )
-    return 0
+        log(f"responses: {result.pipeline.responses or 'none'}")
+        speak_pipeline_responses(
+            result.pipeline.responses,
+            args,
+            follow_up=(
+                "What would you like to do next?"
+                if args.conversation
+                and result.pipeline.command.content.get("intent") != "END_CONVERSATION"
+                else None
+            ),
+        )
+        print(
+            json.dumps(
+                {
+                    "audio_path": str(result.audio_path),
+                    "transcript": result.transcript.__dict__,
+                    "responses": result.pipeline.responses,
+                }
+            )
+        )
+        if not args.conversation:
+            return 0
+        if result.pipeline.command.content.get("intent") == "END_CONVERSATION":
+            return 0
+        if acknowledgement_task is not None:
+            log("agent acknowledgement played; awaiting next turn")
+        else:
+            log("response played; awaiting next turn")
 
 
 
@@ -410,9 +454,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return asyncio.run(run_text(args.text, args))
         if args.record:
             return asyncio.run(run_record(args))
-        if args.stream:
+        if args.stream or args.conversation:
             return asyncio.run(run_stream(args))
-        build_parser().error("one of --text, --record, --stream, or --list-devices is required")
+        build_parser().error("one of --text, --record, --stream, --conversation, or --list-devices is required")
     except KeyboardInterrupt:
         log("operation interrupted")
         return 130

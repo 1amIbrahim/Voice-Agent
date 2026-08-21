@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from voice_gateway.asr import ASREngine, Transcript
 from voice_gateway.audio import (
@@ -41,6 +41,7 @@ class PushToTalkSession:
         audio: bytes,
         output_path: Path,
         context: Optional[Dict[str, Any]] = None,
+        on_agent_started: Optional[Callable[[Any], None]] = None,
     ) -> PushToTalkResult:
         if self.vad is None:
             segment = SpeechSegment(
@@ -61,7 +62,11 @@ class PushToTalkSession:
         utterance = audio[start_byte:end_byte]
         audio_path = self.recorder.save_wav(output_path, utterance)
         transcript = self.asr.transcribe(audio_path, self.recorder.config.sample_rate)
-        pipeline = await self.voice_pipeline.process_transcript(transcript.text, context)
+        pipeline = await self.voice_pipeline.process_transcript(
+            transcript.text,
+            context,
+            on_agent_started=on_agent_started,
+        )
         return PushToTalkResult(
             transcript=transcript,
             audio_path=audio_path,
@@ -75,9 +80,15 @@ class PushToTalkSession:
         output_path: Path,
         context: Optional[Dict[str, Any]] = None,
         device: Optional[Any] = None,
+        on_agent_started: Optional[Callable[[Any], None]] = None,
     ) -> PushToTalkResult:
         audio = self.recorder.record(duration_seconds, device=device)
-        return await self.process_audio(audio, output_path, context)
+        return await self.process_audio(
+            audio,
+            output_path,
+            context,
+            on_agent_started=on_agent_started,
+        )
 
     async def record_until_silence_and_process(
         self,
@@ -88,6 +99,7 @@ class PushToTalkSession:
         speech_detector: Optional[LiveSpeechDetector] = None,
         context: Optional[Dict[str, Any]] = None,
         device: Optional[Any] = None,
+        on_agent_started: Optional[Callable[[Any], None]] = None,
     ) -> PushToTalkResult:
         audio = await asyncio.to_thread(
             self.recorder.record_until_silence,
@@ -97,4 +109,9 @@ class PushToTalkSession:
             speech_detector=speech_detector,
             device=device,
         )
-        return await self.process_audio(audio, output_path, context)
+        return await self.process_audio(
+            audio,
+            output_path,
+            context,
+            on_agent_started=on_agent_started,
+        )

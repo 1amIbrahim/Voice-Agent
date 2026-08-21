@@ -65,6 +65,7 @@ class UserCommand(BaseModel):
     instruction: str
     target: Optional[str] = None
     constraints: List[str] = Field(default_factory=list)
+    acknowledgement: Optional[str] = None
     requires_confirmation: bool = False
 
 

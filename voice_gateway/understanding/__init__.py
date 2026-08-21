@@ -1,13 +1,17 @@
 from .intent import (
+    ConversationEngine,
+    GeminiAssistant,
     IntentResult,
     IntentType,
-    OllamaUnderstanding,
+    OllamaAssistant,
     RuleBasedUnderstanding,
 )
 
 __all__ = [
+    "ConversationEngine",
+    "GeminiAssistant",
     "IntentResult",
     "IntentType",
-    "OllamaUnderstanding",
+    "OllamaAssistant",
     "RuleBasedUnderstanding",
 ]
