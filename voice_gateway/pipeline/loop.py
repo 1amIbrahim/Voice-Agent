@@ -1,5 +1,6 @@
 """Composable local voice-to-agent pipeline."""
 
+import asyncio
 from dataclasses import dataclass, field
 import sys
 from typing import Any, Callable, Dict, List, Optional
@@ -213,11 +214,34 @@ class VoicePipeline:
         self.session_context.remember_command(command)
         agent_events: List[Event] = []
         responses: List[str] = []
+        instruction = str(command.content.get("instruction", ""))
         async for event in self.agent_platform.dispatch(command):
             agent_events.append(event)
             if event.event is EventType.AGENT_STARTED and on_agent_started is not None:
                 on_agent_started(event)
-            response = self.response_formatter.format(event, detail)
+            if event.event is EventType.AGENT_PROGRESS:
+                self._log_agent_progress(event)
+                continue
+            response = None
+            if event.event is EventType.AGENT_COMPLETED:
+                result = event.content.get("message")
+                summarize = getattr(
+                    self.conversation_engine,
+                    "summarize_agent_result",
+                    None,
+                )
+                if callable(summarize) and isinstance(result, str) and result.strip():
+                    try:
+                        response = await asyncio.to_thread(
+                            summarize,
+                            instruction,
+                            result,
+                            self.session_context.interpretation_context(),
+                        )
+                    except Exception as exc:
+                        _log(f"agent result synthesis failed; using fallback: {exc}")
+            if response is None:
+                response = self.response_formatter.format(event, detail)
             if response is not None:
                 responses.append(response)
         _log(
@@ -227,12 +251,21 @@ class VoicePipeline:
         _log(f"formatted agent responses: {len(responses)}")
         remember_exchange = getattr(self.conversation_engine, "remember_exchange", None)
         if callable(remember_exchange) and responses:
-            remember_exchange(
-                str(command.content.get("instruction", "")),
-                " ".join(responses),
-            )
+            remember_exchange(instruction, " ".join(responses))
         return PipelineResult(
             command=command,
             agent_events=agent_events,
             responses=responses,
         )
+
+    @staticmethod
+    def _log_agent_progress(event: Event) -> None:
+        message = event.content.get("message", "Claude Code is working")
+        elapsed = event.content.get("elapsed_seconds")
+        usage = event.content.get("usage")
+        suffix = f" ({elapsed:.1f}s)" if isinstance(elapsed, (int, float)) else ""
+        if isinstance(usage, dict):
+            output_tokens = usage.get("output_tokens")
+            if isinstance(output_tokens, int) and output_tokens > 0:
+                suffix += f" [{output_tokens} output tokens]"
+        _log(f"Claude Code progress: {message}{suffix}")

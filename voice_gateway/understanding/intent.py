@@ -213,6 +213,12 @@ references. Never invent progress, files, results, agent activity, or system
 state. If uncertain, say so briefly. Do not add a generic follow-up question;
 the voice gateway handles follow-ups."""
 
+    RESULT_SYSTEM_PROMPT = """Summarize the supplied agent result for speech.
+State only facts explicitly present in the result and answer the original request.
+Use one to three short sentences in plain language without Markdown, lists, code,
+URLs, headings, permissions, or a follow-up question. Do not claim work occurred
+unless the result says it did. If the result reports a plan, describe it as a plan."""
+
     def __init__(
         self,
         model: str = "qwen3:4b",
@@ -318,6 +324,34 @@ the voice gateway handles follow-ups."""
         self.remember_exchange(transcript, reply)
         return reply
 
+    def summarize_agent_result(
+        self,
+        instruction: str,
+        result: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if not result or not result.strip():
+            raise ValueError("agent result must not be empty")
+        messages = [
+            {"role": "system", "content": self.RESULT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "instruction": instruction,
+                        "agent_result": result,
+                        "context": context or {},
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        response = self._get_client().chat(model=self.model, messages=messages)
+        content = response.get("message", {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("result synthesis model returned an empty response")
+        return content.strip()
+
     def remember_exchange(self, user_text: str, assistant_text: str) -> None:
         if not user_text.strip() or not assistant_text.strip():
             return
@@ -399,6 +433,12 @@ Markdown, lists, code, URLs, or headings. Use context only to resolve relevant
 references. Never invent progress, files, results, agent activity, or system
 state. If uncertain, say so briefly. Do not add a generic follow-up question;
 the voice gateway handles follow-ups."""
+
+    RESULT_SYSTEM_PROMPT = """Summarize the supplied agent result for speech.
+State only facts explicitly present in the result and answer the original request.
+Use one to three short sentences in plain language without Markdown, lists, code,
+URLs, headings, permissions, or a follow-up question. Do not claim work occurred
+unless the result says it did. If the result reports a plan, describe it as a plan."""
 
     def __init__(
         self,
@@ -520,6 +560,39 @@ the voice gateway handles follow-ups."""
         if not reply:
             raise RuntimeError("conversation model returned an empty response")
         self.remember_exchange(transcript, reply)
+        return reply
+
+    def summarize_agent_result(
+        self,
+        instruction: str,
+        result: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if not result or not result.strip():
+            raise ValueError("agent result must not be empty")
+        request = json.dumps(
+            {
+                "instructions": self.RESULT_SYSTEM_PROMPT,
+                "instruction": instruction,
+                "agent_result": result,
+                "context": context or {},
+            },
+            ensure_ascii=False,
+        )
+        self._log("Gemini result synthesis starting")
+        started_at = time.perf_counter()
+        try:
+            interaction = self._get_client().interactions.create(
+                model=self.model,
+                input=request,
+            )
+            reply = self._output_text(interaction).strip()
+        except Exception as exc:
+            self._log_exception("result synthesis", exc, started_at)
+            raise
+        self._log_response("result synthesis", reply, started_at)
+        if not reply:
+            raise RuntimeError("result synthesis model returned an empty response")
         return reply
 
     def remember_exchange(self, user_text: str, assistant_text: str) -> None:

@@ -364,3 +364,69 @@ def test_gemini_assistant_logs_api_exception(capsys):
     logs = capsys.readouterr().err
     assert "Gemini intent failed after" in logs
     assert "TimeoutError: request timed out" in logs
+
+
+def test_ollama_assistant_summarizes_agent_result_without_mutating_history():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"message": {"content": "Claude prepared a three-step review plan."}}
+
+    client = FakeClient()
+    assistant = OllamaAssistant(client=client)
+
+    reply = assistant.summarize_agent_result(
+        "Review authentication",
+        "# Plan\n1. Inspect routes\n2. Check sessions\n3. Add tests",
+    )
+
+    assert reply == "Claude prepared a three-step review plan."
+    assert assistant.history == []
+    assert "Summarize the supplied agent result" in client.calls[0]["messages"][0]["content"]
+    assert "Review authentication" in client.calls[0]["messages"][1]["content"]
+    assert "Inspect routes" in client.calls[0]["messages"][1]["content"]
+    assert not client.calls[0]["messages"][0]["content"].startswith("/no_think")
+
+
+def test_gemini_assistant_summarizes_agent_result_with_concise_logs(capsys):
+    class Interaction:
+        output_text = "Claude found two authentication issues."
+
+    class Interactions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return Interaction()
+
+    class FakeClient:
+        def __init__(self):
+            self.interactions = Interactions()
+
+    client = FakeClient()
+    assistant = GeminiAssistant(client=client)
+
+    reply = assistant.summarize_agent_result(
+        "Review authentication",
+        "A sensitive and very long raw result",
+    )
+
+    assert reply == "Claude found two authentication issues."
+    assert assistant.history == []
+    assert "Review authentication" in client.interactions.calls[0]["input"]
+    assert "A sensitive and very long raw result" in client.interactions.calls[0]["input"]
+    logs = capsys.readouterr().err
+    assert "Gemini result synthesis starting" in logs
+    assert "Gemini result synthesis received in" in logs
+    assert "A sensitive and very long raw result" not in logs
+
+
+def test_result_synthesis_rejects_empty_agent_result():
+    with pytest.raises(ValueError, match="agent result"):
+        OllamaAssistant(client=object()).summarize_agent_result("Review", " ")
+    with pytest.raises(ValueError, match="agent result"):
+        GeminiAssistant(client=object()).summarize_agent_result("Review", " ")

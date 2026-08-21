@@ -127,6 +127,88 @@ async def test_pipeline_remembers_agent_outcome_for_later_conversation():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_synthesizes_completed_result_and_preserves_raw_event():
+    from voice_gateway.understanding import IntentResult, IntentType
+
+    raw_result = "Detailed Claude result " * 300
+
+    class Assistant:
+        def __init__(self):
+            self.exchanges = []
+            self.synthesis_calls = []
+
+        def interpret(self, transcript, context):
+            return IntentResult(
+                intent=IntentType.COMMAND,
+                instruction=transcript,
+                confidence=0.9,
+            )
+
+        def respond(self, transcript, context):
+            return "Ready, sir."
+
+        def summarize_agent_result(self, instruction, result, context):
+            self.synthesis_calls.append((instruction, result, context))
+            return "Claude completed the requested review."
+
+        def remember_exchange(self, user_text, assistant_text):
+            self.exchanges.append((user_text, assistant_text))
+
+    class Agent:
+        async def dispatch(self, command):
+            yield Event(
+                event=EventType.AGENT_PROGRESS,
+                source="test",
+                session_id=command.session_id,
+                content={"message": "Using Read", "elapsed_seconds": 1.2},
+            )
+            yield Event(
+                event=EventType.AGENT_COMPLETED,
+                source="test",
+                session_id=command.session_id,
+                content={"message": raw_result},
+            )
+
+    assistant = Assistant()
+    result = await VoicePipeline(
+        understanding=assistant,
+        agent_platform=Agent(),
+    ).process_transcript("Review authentication")
+
+    assert result.responses == ["Claude completed the requested review."]
+    assert result.agent_events[-1].content["message"] == raw_result
+    assert assistant.synthesis_calls[0][0:2] == ("Review authentication", raw_result)
+    assert assistant.exchanges == [
+        ("Review authentication", "Claude completed the requested review.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_falls_back_when_result_synthesis_fails():
+    from voice_gateway.understanding import IntentResult, IntentType
+
+    class Assistant:
+        def interpret(self, transcript, context):
+            return IntentResult(
+                intent=IntentType.COMMAND,
+                instruction=transcript,
+                confidence=0.9,
+            )
+
+        def respond(self, transcript, context):
+            return "Ready, sir."
+
+        def summarize_agent_result(self, instruction, result, context):
+            raise RuntimeError("provider unavailable")
+
+    result = await VoicePipeline(understanding=Assistant()).process_transcript(
+        "Explore the directory."
+    )
+
+    assert result.responses == ["Task completed."]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_clarification_without_dispatching():
     result = await VoicePipeline().process_transcript("Tell it to fix that")
 

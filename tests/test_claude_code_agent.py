@@ -10,37 +10,64 @@ from voice_gateway.protocol import EventType, UserCommand, user_command
 from voice_gateway.routing import ClaudeCodeAgentPlatform
 
 
+class FakeReader:
+    def __init__(self, data=b"") -> None:
+        self.lines = iter(data.splitlines(keepends=True))
+
+    async def readline(self):
+        return next(self.lines, b"")
+
+    async def read(self):
+        return b"untrusted diagnostic output"
+
+
 class FakeProcess:
     def __init__(self, stdout=b"", returncode=0) -> None:
-        self.stdout = stdout
+        self.stdout = FakeReader(stdout)
+        self.stderr = FakeReader()
         self.returncode = returncode
         self.terminated = False
         self.killed = False
 
-    async def communicate(self):
-        return self.stdout, b"untrusted diagnostic output"
+    async def wait(self):
+        return self.returncode
 
     def terminate(self):
         self.terminated = True
+        self.returncode = -15
 
     def kill(self):
         self.killed = True
+        self.returncode = -9
+
+
+class HangingReader(FakeReader):
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def readline(self):
+        await self.release.wait()
+        return b""
 
 
 class HangingProcess(FakeProcess):
     def __init__(self) -> None:
         super().__init__()
+        self.stdout = HangingReader()
         self.returncode = None
-        self.release = asyncio.Event()
 
-    async def communicate(self):
-        await self.release.wait()
-        return b"", b""
+    async def wait(self):
+        if self.returncode is None:
+            await self.stdout.release.wait()
+        return self.returncode
 
     def terminate(self):
         super().terminate()
-        self.returncode = -15
-        self.release.set()
+        self.stdout.release.set()
+
+
+def stream(*records):
+    return b"".join(json.dumps(record).encode() + b"\n" for record in records)
 
 
 def command():
@@ -56,12 +83,39 @@ def command():
 
 
 @pytest.mark.asyncio
-async def test_claude_code_runs_in_plan_mode_with_raw_json_payload(tmp_path):
+async def test_claude_code_streams_progress_and_preserves_full_result(tmp_path):
     calls = []
+    result = "x" * 5000
+    output = stream(
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "secret reasoning"},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "secret.py"}},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 4},
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": result,
+            "duration_ms": 1200,
+            "duration_api_ms": 900,
+            "ttft_ms": 300,
+            "num_turns": 2,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 20, "output_tokens": 8},
+            "modelUsage": {"claude-sonnet-5": {"inputTokens": 20}},
+        },
+    )
 
     async def create_process(*args, **kwargs):
         calls.append((args, kwargs))
-        return FakeProcess(json.dumps({"result": "Proposed review steps", "is_error": False}).encode())
+        return FakeProcess(output)
 
     platform = ClaudeCodeAgentPlatform(
         workspace=tmp_path,
@@ -75,8 +129,8 @@ async def test_claude_code_runs_in_plan_mode_with_raw_json_payload(tmp_path):
     assert args[0] == sys.executable
     assert args[1] == "-p"
     assert args[args.index("--model") + 1] == "sonnet"
-    assert "--output-format" in args
-    assert args[args.index("--output-format") + 1] == "json"
+    assert args[args.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in args
     assert args[args.index("--permission-mode") + 1] == "plan"
     assert "--tools" not in args
     assert "--no-session-persistence" in args
@@ -90,14 +144,54 @@ async def test_claude_code_runs_in_plan_mode_with_raw_json_payload(tmp_path):
 
     assert [event.event for event in events] == [
         EventType.AGENT_STARTED,
+        EventType.AGENT_PROGRESS,
+        EventType.AGENT_PROGRESS,
         EventType.AGENT_COMPLETED,
     ]
     assert all(event.correlation_id == user_event.id for event in events)
-    assert events[0].content["instruction"] == "Review the authentication flow"
-    assert events[1].content["message"] == "Proposed review steps"
-    assert events[1].content["mode"] == "plan"
-    assert events[0].task_id == events[1].task_id
-    assert events[0].correlation_id == events[1].correlation_id
+    assert events[1].content["message"] == "Claude Code initialized"
+    assert events[2].content["message"] == "Claude Code is using Read"
+    assert "secret reasoning" not in str(events)
+    assert "secret.py" not in str(events)
+    assert events[2].content["usage"]["output_tokens"] == 4
+    assert events[-1].content["message"] == result
+    assert events[-1].content["duration_ms"] == 1200
+    assert events[-1].content["usage"]["output_tokens"] == 8
+    assert events[-1].content["model_usage"]["claude-sonnet-5"]["inputTokens"] == 20
+    assert events[0].task_id == events[-1].task_id
+
+
+def test_claude_code_completion_status_includes_time_and_tokens():
+    status = ClaudeCodeAgentPlatform._completion_status(
+        {
+            "duration_ms": 12500,
+            "usage": {"input_tokens": 100, "output_tokens": 25},
+        }
+    )
+
+    assert status == "Claude Code completed in 12.5s using 100 input and 25 output tokens"
+
+
+@pytest.mark.asyncio
+async def test_claude_code_ignores_malformed_intermediate_line(tmp_path):
+    output = b"not json\n" + stream(
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Done"}
+    )
+
+    async def create_process(*args, **kwargs):
+        return FakeProcess(output)
+
+    events = [
+        event
+        async for event in ClaudeCodeAgentPlatform(
+            workspace=tmp_path,
+            executable=sys.executable,
+            process_factory=create_process,
+        ).dispatch(command())
+    ]
+
+    assert events[-1].event is EventType.AGENT_COMPLETED
+    assert events[-1].content["message"] == "Done"
 
 
 @pytest.mark.asyncio
@@ -118,9 +212,9 @@ async def test_claude_code_maps_nonzero_exit_to_safe_failure(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_claude_code_maps_invalid_json_to_safe_failure(tmp_path):
+async def test_claude_code_maps_missing_final_result_to_safe_failure(tmp_path):
     async def create_process(*args, **kwargs):
-        return FakeProcess(b"not json")
+        return FakeProcess(b"not json\n")
 
     platform = ClaudeCodeAgentPlatform(
         workspace=tmp_path,
@@ -131,6 +225,26 @@ async def test_claude_code_maps_invalid_json_to_safe_failure(tmp_path):
 
     assert events[-1].event is EventType.AGENT_FAILED
     assert events[-1].content["message"] == "Claude Code returned an invalid command response."
+
+
+@pytest.mark.asyncio
+async def test_claude_code_maps_error_result_to_safe_failure(tmp_path):
+    output = stream({"type": "result", "subtype": "error", "is_error": True})
+
+    async def create_process(*args, **kwargs):
+        return FakeProcess(output)
+
+    events = [
+        event
+        async for event in ClaudeCodeAgentPlatform(
+            workspace=tmp_path,
+            executable=sys.executable,
+            process_factory=create_process,
+        ).dispatch(command())
+    ]
+
+    assert events[-1].event is EventType.AGENT_FAILED
+    assert events[-1].content["message"] == "Claude Code could not complete the command."
 
 
 @pytest.mark.asyncio

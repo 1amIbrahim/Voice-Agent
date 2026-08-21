@@ -3,9 +3,9 @@ import { EffectComposer, Bloom, Vignette, Noise } from "@react-three/postprocess
 export function CorePostProcessing() {
   return (
     <EffectComposer multisampling={0}>
-      <Bloom intensity={0.82} luminanceThreshold={0.62} luminanceSmoothing={0.18} mipmapBlur radius={0.58} />
-      <Vignette offset={0.14} darkness={0.82} />
-      <Noise opacity={0.018} />
+      <Bloom intensity={0.48} luminanceThreshold={0.76} luminanceSmoothing={0.12} mipmapBlur radius={0.34} />
+      <Vignette offset={0.16} darkness={0.72} />
+      <Noise opacity={0.012} />
     </EffectComposer>
   );
 }
