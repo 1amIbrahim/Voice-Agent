@@ -38,10 +38,10 @@ function ParticleLayer({ count, inner, outer, scale, color, size, opacity, speed
     points.current.rotation.y = time * speed * (0.7 + activity * 0.45);
     points.current.rotation.x = Math.sin(time * speed * 0.6 + seed) * 0.025;
     const audio = audioSignal.current.mid * audioWeight;
-    points.current.scale.setScalar(1 - activity * 0.012 + Math.sin(time * 0.31 + seed) * 0.006 + audio * 0.025);
+    points.current.scale.setScalar(1 - activity * 0.012 + Math.sin(time * 0.31 + seed) * 0.006 + audio * 0.14);
     if (material.current) {
-      material.current.opacity = Math.min(0.9, opacity * (0.42 + activity * 0.58) + audio * 0.13);
-      material.current.size = size + audioSignal.current.treble * audioWeight * 0.004;
+      material.current.opacity = Math.min(0.95, opacity * (0.42 + activity * 0.58) + audio * 0.38);
+      material.current.size = size + audioSignal.current.treble * audioWeight * 0.012;
     }
   });
 

@@ -29,6 +29,12 @@ export interface GatewayEvent {
   content: Record<string, unknown>;
 }
 
+export type VoiceState = "idle" | "listening" | "processing" | "speaking";
+
+export type VoiceEvent =
+  | { type: "voice.state"; state: VoiceState }
+  | { type: "voice.level"; level: number };
+
 export interface OutboundCommand {
   instruction: string;
   sessionId: string;

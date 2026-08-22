@@ -1,6 +1,6 @@
 from pathlib import Path
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from voice_gateway.tts import PiperTTS, SpokenDetail, speak_responses, spoken_summary
 
@@ -62,6 +62,50 @@ def test_speak_responses_synthesizes_and_plays_combined_text(tmp_path):
     assert played == [output]
 
 
+def test_play_wav_marks_playback_after_audio_starts(tmp_path):
+    import sys
+    import wave
+
+    output = tmp_path / "response.wav"
+    with wave.open(str(output), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x00" * 160)
+
+    events = []
+    sounddevice = MagicMock()
+    sounddevice.play.side_effect = lambda *args: events.append("play")
+    sounddevice.wait.side_effect = lambda: events.append("wait")
+
+    with patch.dict(sys.modules, {"sounddevice": sounddevice}):
+        from voice_gateway.tts.engine import play_wav
+
+        play_wav(output, on_playback_started=lambda: events.append("playback-started"))
+
+    assert events == ["play", "playback-started", "wait"]
+
+
+def test_speak_responses_marks_playback_after_synthesis(tmp_path):
+    events = []
+    output = tmp_path / "response.wav"
+
+    class OrderedTTS:
+        def synthesize(self, text, output_path):
+            events.append("synthesize")
+            return output_path
+
+    speak_responses(
+        ["Ready."],
+        OrderedTTS(),
+        output,
+        on_playback_started=lambda: events.append("playback-started"),
+        player=lambda path: events.append("play"),
+    )
+
+    assert events == ["synthesize", "playback-started", "play"]
+
+
 def test_speak_responses_appends_follow_up_prompt(tmp_path):
     engine = FakeTTS()
     output = tmp_path / "response.wav"
@@ -79,8 +123,15 @@ def test_speak_responses_appends_follow_up_prompt(tmp_path):
 
 def test_speak_responses_skips_empty_responses(tmp_path):
     engine = FakeTTS()
+    playback_started = []
 
-    result = speak_responses(["", "  "], engine, tmp_path / "response.wav")
+    result = speak_responses(
+        ["", "  "],
+        engine,
+        tmp_path / "response.wav",
+        on_playback_started=lambda: playback_started.append(True),
+    )
 
     assert result is None
     assert engine.calls == []
+    assert playback_started == []

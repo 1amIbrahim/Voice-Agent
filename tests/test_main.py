@@ -12,6 +12,7 @@ from voice_gateway.main import (
     run_stream,
     run_text,
     speak_pipeline_responses,
+    wake_word_detected,
 )
 from voice_gateway.audio import EnergySpeechDetector, SileroSpeechDetector
 from voice_gateway.routing import ClaudeCodeAgentPlatform, FakeAgentPlatform
@@ -46,6 +47,13 @@ def test_main_returns_clean_failure_for_runtime_error(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "[voice-gateway] error: boom" in captured.err
     assert "Error in sys.excepthook" not in captured.err
+
+
+def test_wake_word_detection_requires_jarvis_as_a_word():
+    assert wake_word_detected("Jarvis")
+    assert wake_word_detected("Hello, JARVIS!")
+    assert not wake_word_detected("jarvison")
+    assert not wake_word_detected("keep waiting")
 
 
 def test_parser_defaults_to_rule_understanding_and_small_en_asr():

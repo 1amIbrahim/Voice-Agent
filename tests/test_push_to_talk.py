@@ -96,6 +96,52 @@ async def test_streaming_transcribes_and_interprets_only_after_capture_ends(tmp_
 
 
 @pytest.mark.asyncio
+async def test_streaming_can_transcribe_without_processing_intent(tmp_path):
+    recorder = FakeRecorder(tone(0.2))
+    understanding = RecordingUnderstanding()
+    calls = []
+    session = PushToTalkSession(
+        recorder=recorder,
+        vad=None,
+        asr=FakeASR(),
+        voice_pipeline=VoicePipeline(understanding=understanding),
+    )
+
+    result = await session.record_until_silence_and_transcribe(
+        max_duration_seconds=1.0,
+        output_path=tmp_path / "standby.wav",
+        on_audio_chunk=lambda chunk: calls.append("chunk"),
+        on_capture_complete=lambda: calls.append("complete"),
+    )
+
+    assert result.transcript.text == "Tell Claude to check the research folder"
+    assert calls == ["chunk", "chunk", "complete"]
+    assert understanding.seen == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_forwards_audio_chunks_before_capture_complete(tmp_path):
+    recorder = FakeRecorder(tone(0.2))
+    calls = []
+    session = PushToTalkSession(
+        recorder=recorder,
+        vad=None,
+        asr=FakeASR(),
+        voice_pipeline=VoicePipeline(),
+    )
+
+    await session.record_until_silence_and_process(
+        max_duration_seconds=1.0,
+        output_path=tmp_path / "stream.wav",
+        on_audio_chunk=lambda chunk: calls.append(("chunk", chunk)),
+        on_capture_complete=lambda: calls.append(("complete", None)),
+    )
+
+    assert [kind for kind, _ in calls] == ["chunk", "chunk", "complete"]
+    assert b"".join(chunk for kind, chunk in calls if kind == "chunk") == recorder.audio
+
+
+@pytest.mark.asyncio
 async def test_streaming_does_not_call_asr_from_capture_callback(tmp_path):
     class CallbackTrackingRecorder(FakeRecorder):
         def record_until_silence(self, *args, on_chunk=None, **kwargs):

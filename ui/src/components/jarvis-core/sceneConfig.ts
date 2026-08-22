@@ -24,8 +24,8 @@ export const JARVIS_SCENE = {
     nodeCount: 64,
   },
   particles: {
-    inner: 0,
-    middle: 0,
+    inner: 100,
+    middle: 200,
     atmospheric: 750,
   },
 } as const;

@@ -18,6 +18,7 @@ class IntentType(str, Enum):
     CLARIFICATION = "CLARIFICATION"
     CANCELLATION = "CANCELLATION"
     END_CONVERSATION = "END_CONVERSATION"
+    STANDBY = "STANDBY"
     NOTIFICATION_RESPONSE = "NOTIFICATION_RESPONSE"
     CONVERSATION = "CONVERSATION"
 
@@ -66,6 +67,8 @@ class RuleBasedUnderstanding:
 
         if self._is_end_conversation(control_text):
             return IntentResult(intent=IntentType.END_CONVERSATION, confidence=0.99)
+        if self._is_standby(control_text):
+            return IntentResult(intent=IntentType.STANDBY, confidence=0.99)
         if self._is_cancellation(control_text):
             return IntentResult(intent=IntentType.CANCELLATION, confidence=0.99)
         if self._is_confirmation(control_text):
@@ -105,6 +108,10 @@ class RuleBasedUnderstanding:
     @staticmethod
     def _is_end_conversation(text: str) -> bool:
         return text in {"end conversation", "end the conversation"}
+
+    @staticmethod
+    def _is_standby(text: str) -> bool:
+        return text in {"stand by", "standby"}
 
     @staticmethod
     def _is_cancellation(text: str) -> bool:
@@ -188,8 +195,8 @@ README file?” are COMMAND. Preserve the user's requested scope, negation,
 constraints, entities, and desired outcome in a concise agent-facing instruction.
 
 QUERY and CONVERSATION are for replies the assistant can answer without an
-agent. CONFIRMATION, REJECTION, CANCELLATION, and END_CONVERSATION are reserved
-for explicit control phrases and must never be inferred from unrelated requests.
+agent. CONFIRMATION, REJECTION, CANCELLATION, STANDBY, and END_CONVERSATION are
+reserved for explicit control phrases and must never be inferred from unrelated requests.
 Use requires_clarification=true only when missing information could cause the
 agent to perform the wrong action. For COMMAND intents, include an acknowledgement
 that a composed Jarvis-like assistant can speak immediately while the agent works.
@@ -263,6 +270,7 @@ unless the result says it did. If the result reports a plan, describe it as a pl
             IntentType.REJECTION,
             IntentType.CANCELLATION,
             IntentType.END_CONVERSATION,
+            IntentType.STANDBY,
         }
         if deterministic.intent in control_intents:
             return deterministic
@@ -409,8 +417,8 @@ README file?” are COMMAND. Preserve the user's requested scope, negation,
 constraints, entities, and desired outcome in a concise agent-facing instruction.
 
 QUERY and CONVERSATION are for replies the assistant can answer without an
-agent. CONFIRMATION, REJECTION, CANCELLATION, and END_CONVERSATION are reserved
-for explicit control phrases and must never be inferred from unrelated requests.
+agent. CONFIRMATION, REJECTION, CANCELLATION, STANDBY, and END_CONVERSATION are
+reserved for explicit control phrases and must never be inferred from unrelated requests.
 Use requires_clarification=true only when missing information could cause the
 agent to perform the wrong action. For COMMAND intents, include an acknowledgement
 that a composed Jarvis-like assistant can speak immediately while the agent works.
@@ -490,6 +498,7 @@ unless the result says it did. If the result reports a plan, describe it as a pl
             IntentType.REJECTION,
             IntentType.CANCELLATION,
             IntentType.END_CONVERSATION,
+            IntentType.STANDBY,
         }
         if deterministic.intent in control_intents:
             self._log(

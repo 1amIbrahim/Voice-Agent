@@ -5,9 +5,10 @@ import array
 import asyncio
 import json
 import math
+import re
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 
 InputDevice = Any
@@ -78,11 +79,16 @@ def format_optional(value: Optional[float]) -> str:
     return "unknown" if value is None else f"{value:.3f}"
 
 
+def wake_word_detected(transcript: str) -> bool:
+    return re.search(r"\bjarvis\b", transcript, re.IGNORECASE) is not None
+
+
 from voice_gateway.asr import OpenAIWhisperASR
 from voice_gateway.audio import AudioRecorder, EnergySpeechDetector, SileroSpeechDetector
 from voice_gateway.pipeline import PushToTalkSession, VoicePipeline
 from voice_gateway.routing import ClaudeCodeAgentPlatform, FakeAgentPlatform
 from voice_gateway.tts import PiperTTS, SpokenDetail, speak_responses
+from voice_gateway.ui import VoiceEventServer, normalized_pcm16_rms
 from voice_gateway.understanding import GeminiAssistant, OllamaAssistant, RuleBasedUnderstanding
 
 
@@ -125,6 +131,7 @@ def speak_pipeline_responses(
     responses: List[str],
     args: argparse.Namespace,
     follow_up: Optional[str] = None,
+    on_playback_started: Optional[Callable[[], None]] = None,
 ) -> Optional[Path]:
     if args.tts != "piper":
         return None
@@ -137,6 +144,7 @@ def speak_pipeline_responses(
         args.tts_output,
         detail=SpokenDetail(args.spoken_detail),
         follow_up=follow_up,
+        on_playback_started=on_playback_started,
     )
     if output_path is not None:
         log(f"spoken response played: {output_path}")
@@ -152,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--stream", action="store_true", help="transcribe while listening and stop after silence")
     mode.add_argument("--conversation", action="store_true", help="continue endpointed voice turns until 'end conversation'")
     parser.add_argument("--list-devices", action="store_true", help="list available microphone devices")
+    parser.add_argument(
+        "--ui-events-port",
+        type=int,
+        help="serve voice state and audio level events on localhost using SSE",
+    )
     parser.add_argument("--duration", type=float, default=5.0, help="recording duration in seconds")
     parser.add_argument("--silence-duration", type=float, default=3.0, help="seconds of silence that end streaming capture")
     parser.add_argument("--output", type=Path, default=Path("recordings/utterance.wav"))
@@ -330,104 +343,171 @@ async def run_stream(args: argparse.Namespace) -> int:
     log(f"ASR model: {args.model_size}")
     log(f"output: {args.output}")
 
-    recorder = AudioRecorder()
-    live_vad = build_live_vad(args)
-    if args.vad == "silero":
-        log(f"VAD: silero (threshold {args.silero_threshold:.2f})")
-        log("loading Silero VAD")
-        live_vad.warm_up()
-        log("Silero VAD loaded")
-    else:
-        log(f"VAD: energy (threshold {args.vad_threshold:.4f})")
-    asr = OpenAIWhisperASR(model_size=args.model_size)
-    log("loading ASR model")
-    asr.warm_up()
-    log("ASR model loaded")
-    log(f"CUDA available: {'yes' if asr.cuda_available() else 'no'}")
-    log(f"ASR runtime device: {asr.runtime_device}")
-    session = PushToTalkSession(
-        recorder=recorder,
-        vad=None,
-        asr=asr,
-        voice_pipeline=pipeline_for(args),
-    )
-    device = resolve_input_device(args.device)
-    if device is not None:
-        log(f"microphone device: {device}")
+    ui_events = VoiceEventServer(args.ui_events_port) if args.ui_events_port is not None else None
+    if ui_events is not None:
+        ui_events.start()
+        log(f"UI voice events: http://127.0.0.1:{ui_events.bound_port}/events")
 
-    while True:
-        log("recording started; speak now")
-        acknowledgement_task: Optional[asyncio.Task] = None
-
-        def speak_acknowledgement(event: Any) -> None:
-            nonlocal acknowledgement_task
-            acknowledgement = session.voice_pipeline.response_formatter.acknowledgement(event)
-            log(f"acknowledgement: {acknowledgement}")
-            acknowledgement_task = asyncio.create_task(
-                asyncio.to_thread(speak_pipeline_responses, [acknowledgement], args)
-            )
-
-        try:
-            result = await session.record_until_silence_and_process(
-                max_duration_seconds=args.duration,
-                output_path=args.output,
-                silence_duration_seconds=args.silence_duration,
-                speech_threshold=args.vad_threshold,
-                speech_detector=live_vad,
-                device=device,
-                on_agent_started=speak_acknowledgement if args.conversation else None,
-            )
-        except KeyboardInterrupt:
-            log("streaming recording interrupted before completion")
-            return 130
-        except RuntimeError as exc:
-            log_error(f"streaming recording failed: {exc}")
-            return 1
-        except ValueError as exc:
-            log_error(str(exc))
-            return 1
-
-        if acknowledgement_task is not None:
-            await acknowledgement_task
-        log("silence endpoint detected")
-        log("intent and agent processing complete")
-        log(f"audio saved: {result.audio_path}")
-        log(f"final transcript: {result.transcript.text!r}")
-        log(f"interpreted intent: {result.pipeline.command.content.get('intent', 'unknown')}")
-        log(f"agent target: {result.pipeline.command.content.get('target', 'none')}")
-        log(f"string sent to agent: {result.pipeline.command.content.get('instruction', '')!r}")
-        log(
-            "agent lifecycle events: "
-            f"{[event.event.value for event in result.pipeline.agent_events] or 'none'}"
-        )
-        log(f"responses: {result.pipeline.responses or 'none'}")
-        speak_pipeline_responses(
-            result.pipeline.responses,
-            args,
-            follow_up=(
-                "What would you like to do next?"
-                if args.conversation
-                and result.pipeline.command.content.get("intent") != "END_CONVERSATION"
-                else None
-            ),
-        )
-        print(
-            json.dumps(
-                {
-                    "audio_path": str(result.audio_path),
-                    "transcript": result.transcript.__dict__,
-                    "responses": result.pipeline.responses,
-                }
-            )
-        )
-        if not args.conversation:
-            return 0
-        if result.pipeline.command.content.get("intent") == "END_CONVERSATION":
-            return 0
-        if acknowledgement_task is not None:
-            log("agent acknowledgement played; awaiting next turn")
+    try:
+        recorder = AudioRecorder()
+        live_vad = build_live_vad(args)
+        if args.vad == "silero":
+            log(f"VAD: silero (threshold {args.silero_threshold:.2f})")
+            log("loading Silero VAD")
+            live_vad.warm_up()
+            log("Silero VAD loaded")
         else:
-            log("response played; awaiting next turn")
+            log(f"VAD: energy (threshold {args.vad_threshold:.4f})")
+        asr = OpenAIWhisperASR(model_size=args.model_size)
+        log("loading ASR model")
+        asr.warm_up()
+        log("ASR model loaded")
+        log(f"CUDA available: {'yes' if asr.cuda_available() else 'no'}")
+        log(f"ASR runtime device: {asr.runtime_device}")
+        session = PushToTalkSession(
+            recorder=recorder,
+            vad=None,
+            asr=asr,
+            voice_pipeline=pipeline_for(args),
+        )
+        device = resolve_input_device(args.device)
+        if device is not None:
+            log(f"microphone device: {device}")
+
+        def publish_state(state: str) -> None:
+            if ui_events is not None:
+                ui_events.publish_level(0.0)
+                ui_events.publish_state(state)
+
+        def publish_chunk(chunk: bytes) -> None:
+            if ui_events is not None:
+                ui_events.publish_level(normalized_pcm16_rms(chunk))
+
+        async def speak_with_state(
+            responses: List[str],
+            follow_up: Optional[str] = None,
+        ) -> Optional[Path]:
+            if args.tts != "piper":
+                return None
+            try:
+                return await asyncio.to_thread(
+                    speak_pipeline_responses,
+                    responses,
+                    args,
+                    follow_up,
+                    lambda: publish_state("speaking"),
+                )
+            finally:
+                publish_state("processing")
+
+        standby = False
+        while True:
+            publish_state("listening")
+            log("standby listening for Jarvis" if standby else "recording started; speak now")
+            acknowledgement_task: Optional[asyncio.Task] = None
+
+            def speak_acknowledgement(event: Any) -> None:
+                nonlocal acknowledgement_task
+                acknowledgement = session.voice_pipeline.response_formatter.acknowledgement(event)
+                log(f"acknowledgement: {acknowledgement}")
+                acknowledgement_task = asyncio.create_task(
+                    speak_with_state([acknowledgement])
+                )
+
+            try:
+                if standby:
+                    utterance = await session.record_until_silence_and_transcribe(
+                        max_duration_seconds=args.duration,
+                        output_path=args.output,
+                        silence_duration_seconds=args.silence_duration,
+                        speech_threshold=args.vad_threshold,
+                        speech_detector=live_vad,
+                        device=device,
+                        on_audio_chunk=publish_chunk if ui_events is not None else None,
+                    )
+                    transcript = utterance.transcript.text
+                    log(f"standby transcript: {transcript!r}")
+                    if not wake_word_detected(transcript):
+                        log("standby utterance ignored")
+                        continue
+                    log("wake word detected")
+                    await speak_with_state(["Yes, sir."])
+                    standby = False
+                    continue
+
+                result = await session.record_until_silence_and_process(
+                    max_duration_seconds=args.duration,
+                    output_path=args.output,
+                    silence_duration_seconds=args.silence_duration,
+                    speech_threshold=args.vad_threshold,
+                    speech_detector=live_vad,
+                    device=device,
+                    on_agent_started=speak_acknowledgement if args.conversation else None,
+                    on_audio_chunk=publish_chunk if ui_events is not None else None,
+                    on_capture_complete=lambda: publish_state("processing"),
+                )
+            except KeyboardInterrupt:
+                log("streaming recording interrupted before completion")
+                return 130
+            except RuntimeError as exc:
+                log_error(f"streaming recording failed: {exc}")
+                return 1
+            except ValueError as exc:
+                log_error(str(exc))
+                return 1
+
+            if acknowledgement_task is not None:
+                await acknowledgement_task
+            log("silence endpoint detected")
+            log("intent and agent processing complete")
+            log(f"audio saved: {result.audio_path}")
+            log(f"final transcript: {result.transcript.text!r}")
+            log(f"interpreted intent: {result.pipeline.command.content.get('intent', 'unknown')}")
+            log(f"agent target: {result.pipeline.command.content.get('target', 'none')}")
+            log(f"string sent to agent: {result.pipeline.command.content.get('instruction', '')!r}")
+            log(
+                "agent lifecycle events: "
+                f"{[event.event.value for event in result.pipeline.agent_events] or 'none'}"
+            )
+            log(f"responses: {result.pipeline.responses or 'none'}")
+            await speak_with_state(
+                result.pipeline.responses,
+                follow_up=(
+                    "What would you like to do next?"
+                    if args.conversation
+                    and result.pipeline.command.content.get("intent") != "END_CONVERSATION"
+                    else None
+                ),
+            )
+            print(
+                json.dumps(
+                    {
+                        "audio_path": str(result.audio_path),
+                        "transcript": result.transcript.__dict__,
+                        "responses": result.pipeline.responses,
+                    }
+                )
+            )
+            if result.pipeline.command.content.get("intent") == "STANDBY":
+                standby = True
+                log("standby mode active; say Jarvis to resume")
+                continue
+            if not args.conversation:
+                return 0
+            if result.pipeline.command.content.get("intent") == "END_CONVERSATION":
+                return 0
+            if acknowledgement_task is not None:
+                log("agent acknowledgement played; awaiting next turn")
+            else:
+                log("response played; awaiting next turn")
+    finally:
+        if ui_events is not None:
+            ui_events.publish_level(0.0)
+            ui_events.publish_state("idle")
+            ui_events.close()
+
+
+
 
 
 

@@ -40,6 +40,35 @@ async def test_pipeline_exits_conversation_without_dispatching():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_enters_standby_without_model_reply_or_dispatch():
+    class Assistant:
+        def __init__(self):
+            self.responded = False
+            self.exchanges = []
+
+        def interpret(self, transcript, context):
+            from voice_gateway.understanding import RuleBasedUnderstanding
+
+            return RuleBasedUnderstanding().interpret(transcript, context)
+
+        def respond(self, transcript, context):
+            self.responded = True
+            return "unexpected"
+
+        def remember_exchange(self, user_text, assistant_text):
+            self.exchanges.append((user_text, assistant_text))
+
+    assistant = Assistant()
+    result = await VoicePipeline(understanding=assistant).process_transcript("Stand by")
+
+    assert result.command.content["intent"] == "STANDBY"
+    assert result.agent_events == []
+    assert result.responses == []
+    assert assistant.responded is False
+    assert assistant.exchanges == []
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_conversation_reply_without_dispatching():
     class Conversation:
         def respond(self, transcript, context):

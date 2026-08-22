@@ -7,7 +7,7 @@ from typing import Callable, Optional, Protocol, Sequence
 import wave
 
 
-WavPlayer = Callable[[Path], None]
+WavPlayer = Callable[..., None]
 
 
 class SpokenDetail(str, Enum):
@@ -54,7 +54,10 @@ def _plain_text(text: str) -> str:
     return re.sub(r"\s+", " ", without_lists).strip()
 
 
-def play_wav(path: Path) -> None:
+def play_wav(
+    path: Path,
+    on_playback_started: Optional[Callable[[], None]] = None,
+) -> None:
     """Play a PCM16 WAV file through the default audio output."""
     source = Path(path)
     try:
@@ -78,6 +81,8 @@ def play_wav(path: Path) -> None:
         samples = samples.reshape(-1, channels)
     try:
         sd.play(samples, sample_rate)
+        if on_playback_started is not None:
+            on_playback_started()
         sd.wait()
     except Exception as exc:
         raise RuntimeError("Could not play synthesized audio through the default output device") from exc
@@ -90,6 +95,7 @@ def speak_responses(
     detail: SpokenDetail = SpokenDetail.BRIEF,
     player: WavPlayer = play_wav,
     follow_up: Optional[str] = None,
+    on_playback_started: Optional[Callable[[], None]] = None,
 ) -> Optional[Path]:
     text = "\n\n".join(response.strip() for response in responses if response.strip())
     spoken_text = spoken_summary(text, detail)
@@ -98,7 +104,12 @@ def speak_responses(
     if not spoken_text:
         return None
     audio_path = engine.synthesize(spoken_text, output_path)
-    player(audio_path)
+    if player is play_wav:
+        player(audio_path, on_playback_started)
+    else:
+        if on_playback_started is not None:
+            on_playback_started()
+        player(audio_path)
     return audio_path
 
 

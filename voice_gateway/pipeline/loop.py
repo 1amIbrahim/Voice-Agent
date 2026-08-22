@@ -77,6 +77,9 @@ class VoicePipeline:
         if intent.intent is IntentType.END_CONVERSATION:
             _log("conversation exit received; dispatch skipped")
             return self._conversation_exit_result()
+        if intent.intent is IntentType.STANDBY:
+            _log("standby received; dispatch skipped")
+            return self._standby_result()
         if intent.intent is IntentType.CONFIRMATION:
             _log("confirmation received; checking for a pending command")
             return await self._approve_pending_confirmation(detail, on_agent_started)
@@ -158,6 +161,16 @@ class VoicePipeline:
             session_id=self.session_id,
         )
         return PipelineResult(command=command, responses=["Conversation ended. Goodbye."])
+
+    def _standby_result(self) -> PipelineResult:
+        command = user_command(
+            UserCommand(
+                intent=IntentType.STANDBY.value,
+                instruction="stand by",
+            ),
+            session_id=self.session_id,
+        )
+        return PipelineResult(command=command)
 
     async def _approve_pending_confirmation(
         self,

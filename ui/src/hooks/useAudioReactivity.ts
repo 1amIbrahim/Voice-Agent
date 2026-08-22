@@ -9,8 +9,13 @@ function average(data: Uint8Array, from: number, to: number): number {
   return total / Math.max(1, to - from) / 255;
 }
 
-export function useAudioReactivity(state: AIState, connection?: AudioAnalyserConnection): AudioReactiveSignal {
+export function useAudioReactivity(state: AIState, externalLevel?: number, connection?: AudioAnalyserConnection): AudioReactiveSignal {
   const signal = useRef<AudioReactiveSignal>(createAudioSignal()).current;
+  const externalLevelRef = useRef(externalLevel);
+
+  useEffect(() => {
+    externalLevelRef.current = externalLevel;
+  }, [externalLevel]);
 
   useEffect(() => {
     let frame = 0;
@@ -36,10 +41,13 @@ export function useAudioReactivity(state: AIState, connection?: AudioAnalyserCon
         targetTreble = targetLevel * (0.48 + Math.max(0, Math.sin(seconds * 15.4)) * 0.34);
       } else if (state === "listening") {
         const seconds = time / 1000;
-        targetLevel = 0.08 + Math.max(0, Math.sin(seconds * 3.2)) * 0.1;
-        targetBass = targetLevel * 0.7;
+        const liveLevel = externalLevelRef.current;
+        targetLevel = liveLevel === undefined
+          ? 0.08 + Math.max(0, Math.sin(seconds * 3.2)) * 0.1
+          : Math.min(1, Math.pow(liveLevel, 0.72) * 1.35);
+        targetBass = targetLevel * 0.82;
         targetMid = targetLevel;
-        targetTreble = targetLevel * 0.54;
+        targetTreble = targetLevel * 0.68;
       }
       const smoothing = targetLevel > signal.current.level ? 0.22 : 0.08;
       signal.current.level += (targetLevel - signal.current.level) * smoothing;

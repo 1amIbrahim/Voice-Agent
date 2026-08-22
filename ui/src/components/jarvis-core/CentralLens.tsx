@@ -103,12 +103,12 @@ export function CentralLens({ state, audioSignal }: CentralLensProps) {
     if (root.current) {
       root.current.rotation.x = -0.16 + Math.sin(time * 0.12) * 0.018;
       root.current.rotation.y = 0.38 + Math.sin(time * 0.09) * 0.032;
-      root.current.scale.setScalar(JARVIS_SCENE.lens.scale * (1 + bass * 0.018));
+      root.current.scale.setScalar(JARVIS_SCENE.lens.scale * (1 + bass * 0.12));
     }
     
     if (rear.current) rear.current.rotation.z = time * 0.024;
-    if (energy.current) energy.current.opacity = (state === "offline" ? 0.018 : 0.18 + activity * 0.13) + level * 0.08;
-    if (light.current) light.current.intensity = (state === "offline" ? 0.08 : 1.7 + activity * 1.1) + mid * 1.5;
+    if (energy.current) energy.current.opacity = Math.min(0.92, (state === "offline" ? 0.018 : 0.18 + activity * 0.13) + level * 0.32);
+    if (light.current) light.current.intensity = (state === "offline" ? 0.08 : 1.7 + activity * 1.1) + mid * 3.2;
 
     // Reactively drive the Core 3D Sphere scaling and glow intensity using voice frequencies
     if (state !== "offline") {

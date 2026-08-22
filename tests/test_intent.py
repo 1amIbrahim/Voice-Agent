@@ -68,6 +68,8 @@ def test_control_intents(interpreter):
     assert interpreter.interpret("Yes, please").intent is IntentType.CONFIRMATION
     assert interpreter.interpret("No").intent is IntentType.REJECTION
     assert interpreter.interpret("End conversation").intent is IntentType.END_CONVERSATION
+    assert interpreter.interpret("Stand by").intent is IntentType.STANDBY
+    assert interpreter.interpret("Standby.").intent is IntentType.STANDBY
 
 
 def test_empty_transcript_is_rejected(interpreter):
@@ -82,6 +84,25 @@ def test_intent_result_serializes_to_schema():
     properties = result.model_json_schema()["properties"]
     assert "requires_clarification" in properties
     assert "acknowledgement" in properties
+
+
+def test_ollama_assistant_skips_model_for_standby():
+    class FakeClient:
+        def chat(self, **kwargs):
+            raise AssertionError("model should not be called")
+
+    result = OllamaAssistant(client=FakeClient()).interpret("Stand by")
+
+    assert result.intent is IntentType.STANDBY
+
+
+def test_gemini_assistant_skips_model_for_standby():
+    class FakeClient:
+        interactions = None
+
+    result = GeminiAssistant(client=FakeClient()).interpret("Stand by")
+
+    assert result.intent is IntentType.STANDBY
 
 
 def test_ollama_assistant_uses_non_thinking_only_for_intent():
